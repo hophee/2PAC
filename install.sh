@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 eval "$(conda shell.bash hook)"
 
-conda env create -f environment.yml -y
+conda env create -f env.yml -y
 #PRIMER3
 git clone https://github.com/primer3-org/primer3.git primer3
 cd primer3/src
