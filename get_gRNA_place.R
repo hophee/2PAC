@@ -251,7 +251,7 @@ genome_screening_old_end <- genome_primers[1,29]
 #Результаты
 gRNAs_forward_primers <- DNAStringSet(paste0('ACGACTAGT', 
                                              substring(best_gRNA$target_sequence, 1, 20), 
-                                             'GTTTTAGAGCTAGAAATAGCAAGTT'))
+                                             'GTTTTAGAGCTAGAAATAGCAAGTTaaaataaggct'))
 gRNA_revers_primer <- DNAStringSet(c(gRNA_revers = 'AGTTGACGCTAAAAAAAGCACCGACTCGGTGCC'))
 names(gRNAs_forward_primers) <- paste0('gRNA_forward', 1:3)
 left_homology_arm_primer <- DNAStringSet(c(paste0('AGCGTCAACT',left_primers$PRIMER_LEFT_SEQUENCE[1]),
@@ -287,7 +287,7 @@ ins_start <- regexpr('ACTAGT',pTargert_seq, ignore.case=T)[1]
 ins_end <- regexpr('CTGCAG',pTargert_seq, ignore.case=T)[1]
 
 pcr_products_gRNA <- sapply(gRNAs_forward_primers, function(x){
-  c(x, DNAString('aaaataaggctagtccgttatcaacttgaaaaagtggcaccgagtcggtgctttttttAGCGTCAACT'))
+  c(x, DNAString('agtccgttatcaacttgaaaaagtggcaccgagtcggtgctttttttAGCGTCAACT'))
 })
 names(pcr_products_gRNA) <- paste0('gRNA_F', 1:3, '_pcr_product')
 

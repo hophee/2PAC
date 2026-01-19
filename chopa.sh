@@ -1,4 +1,6 @@
 #!/usr/bin/bash
+#source: https://github.com/hophee/2PAC
+
 eval "$(conda shell.bash hook)"
 conda activate chopchop
 
