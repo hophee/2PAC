@@ -61,8 +61,8 @@ if [ $? -ne 0 ]; then
 fi
 
 
-echo -e "\\n !!Проверка на оффтаргет для праймеров!! \\n"
-java -jar virtualPCR/dist/virtualPCR.jar "$output_dir"/pcr_config.conf
+echo -e "\\n Проверка на оффтаргет для праймеров"
+java -jar virtualPCR/dist/virtualPCR.jar "$output_dir"/pcr_config.conf &> /dev/null
 
 rm "$output_dir"/sequence.fa "$output_dir"/gene_file.fa
 mkdir -p "$output_dir"/additional_files
@@ -72,10 +72,10 @@ mv "$output_dir"/right_arm_report.txt "$output_dir"/additional_files/
 mv "$output_dir"/left_arm_report.txt "$output_dir"/additional_files/
 mv "$output_dir"/pcr_config.conf "$output_dir"/additional_files/
 mv "$output_dir"/primer3_settings.txt "$output_dir"/additional_files/
-mv "$output_dir"/offtarget_check.txt "$output_dir"/additional_files/
+mv "$output_dir"/genome_screening_report.txt "$output_dir"/additional_files/
 
 mkdir -p "$output_dir"/sequences
 mv "$output_dir"/offtarget.fa "$output_dir"/sequences/
 mv "$output_dir"/homology_arms.fa "$output_dir"/sequences/
 
-echo -e " \\nРезультаты сохранены в директории" "$output_dir"
+echo -e " \\n \\n!!Результаты сохранены в директории" "$(readlink -f $output_dir)!!"
