@@ -26,7 +26,7 @@ if [ ! -f "bwt_idx/${genome_name}.1.ebwt" ]; then
 fi
 
 
-TARGET_REGION=$(Rscript get_cords.R "$1" "$2" "$3")
+TARGET_REGION=$(Rscript get_cords2.R "$1" "$2" "$3")
 
 # Проверяем, что TARGET_REGION не пуст
 if [ -z "$TARGET_REGION" ]; then
@@ -57,7 +57,7 @@ mkdir -p "$output_dir"/offtargets_n20
 mv "$output_dir"/*offtargets "$output_dir"/offtargets_n20/
 
 echo -e "Извлекаю последовательности плеч гомологии..."
-Rscript get_gRNA_place.R "$output_dir" "$1" "$4" "$2" "$3"
+Rscript get_gRNA_place2.R "$output_dir" "$1" "$4" "$2" "$3"
 
 if [ $? -ne 0 ]; then
   echo -e "Ошибка при извлечении последовательностей плеч гомологии" >&2
@@ -78,7 +78,6 @@ mv "$output_dir"/right_arm_report.txt "$output_dir"/additional_files/
 mv "$output_dir"/left_arm_report.txt "$output_dir"/additional_files/
 mv "$output_dir"/pcr_config.conf "$output_dir"/additional_files/
 mv "$output_dir"/pcr_config2.conf "$output_dir"/additional_files/
-mv "$output_dir"/pcr_config3.conf "$output_dir"/additional_files/
 mv "$output_dir"/primer3_settings.txt "$output_dir"/additional_files/
 mv "$output_dir"/genome_screening_report.txt "$output_dir"/additional_files/
 mv "$output_dir"/primer3_table.tsv "$output_dir"/additional_files/
