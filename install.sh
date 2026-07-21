@@ -1,20 +1,81 @@
-#!/usr/bin/bash
-eval "$(conda shell.bash hook)"
+#!/usr/bin/env bash
+set -uo pipefail
 
-conda env create -f environment.yml -y
-#PRIMER3
-git clone https://github.com/primer3-org/primer3.git primer3
-cd primer3/src
-make
-cd ../../
+readonly PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly ENV_FILE="$PROJECT_DIR/env.yml"
+readonly CHOPCHOP_REPOSITORY="${CHOPCHOP_REPOSITORY:-https://bitbucket.org/valenlab/chopchop.git}"
+readonly CALL_PRIMER3_URL="https://gist.githubusercontent.com/IdoBar/5e78ae7a5cc7277a04b126ce6f595d6e/raw/45c60662f3479f41765bce839835c4988a7e5b36/callPrimer3.R"
 
-#virtualPCR
-git clone https://github.com/rkalendar/virtualPCR.git
+declare -a FAILED_COMPONENTS=()
 
-#CHOPCHOP
-git clone https://bitbucket.org/valenlab/chopchop.git
-#change config pathes
+run_step() {
+  local component=$1
+  shift
 
-#callPrimer3 for R
-wget https://gist.githubusercontent.com/IdoBar/5e78ae7a5cc7277a04b126ce6f595d6e/raw/45c60662f3479f41765bce839835c4988a7e5b36/callPrimer3.R
+  if "$@"; then
+    printf 'OK: %s\n' "$component"
+  else
+    printf 'FAILED: %s\n' "$component" >&2
+    FAILED_COMPONENTS+=("$component")
+  fi
+}
 
+clone_if_missing() {
+  local repository=$1
+  local destination=$2
+
+  if [[ -e "$destination" && ! -d "$destination/.git" ]]; then
+    printf 'ERROR: %s already exists but is not a Git checkout.\n' "$destination" >&2
+    return 1
+  fi
+  if [[ ! -e "$destination" ]]; then
+    GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$repository" "$destination" || return 1
+  fi
+}
+
+install_conda_environment() {
+  [[ -f "$ENV_FILE" ]] || {
+    printf 'ERROR: Conda environment file not found: %s\n' "$ENV_FILE" >&2
+    return 1
+  }
+  eval "$(conda shell.bash hook)" || return 1
+
+  if conda env list | awk 'NR > 2 { print $1 }' | grep -qx chopchop; then
+    conda env update --name chopchop --file "$ENV_FILE" --prune
+  else
+    conda env create --file "$ENV_FILE" --yes
+  fi
+}
+
+download_call_primer3() {
+  local temporary_file
+  temporary_file="$(mktemp "$PROJECT_DIR/.callPrimer3.R.XXXXXX")" || return 1
+
+  if ! curl --fail --location --silent --show-error "$CALL_PRIMER3_URL" --output "$temporary_file"; then
+    rm -f "$temporary_file"
+    return 1
+  fi
+  mv "$temporary_file" "$PROJECT_DIR/callPrimer3.R"
+}
+
+cd "$PROJECT_DIR"
+if command -v conda >/dev/null; then
+  run_step "Conda environment chopchop" install_conda_environment
+else
+  printf 'FAILED: Conda environment chopchop (conda was not found in PATH)\n' >&2
+  FAILED_COMPONENTS+=("Conda environment chopchop")
+fi
+run_step "primer3 source" clone_if_missing https://github.com/primer3-org/primer3.git primer3
+run_step "primer3 build" make -C primer3/src
+run_step "virtualPCR source" clone_if_missing https://github.com/rkalendar/virtualPCR.git virtualPCR
+run_step "CHOPCHOP source" clone_if_missing "$CHOPCHOP_REPOSITORY" chopchop
+run_step "callPrimer3.R" download_call_primer3
+
+if (( ${#FAILED_COMPONENTS[@]} == 0 )); then
+  printf 'Installation completed successfully.\n'
+else
+  printf '\nInstallation completed with missing components:\n' >&2
+  printf '  - %s\n' "${FAILED_COMPONENTS[@]}" >&2
+  printf 'CHOPCHOP can be supplied with CHOPCHOP_REPOSITORY=<accessible Git URL>.\n' >&2
+  exit 1
+fi

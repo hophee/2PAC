@@ -41,7 +41,7 @@ mkdir -p "$output_dir"
 
 # Запуск chopchop
 echo 'Запуск chopchop'
-python valenlab-chopchop-a56388468523/chopchop.py \
+python chopchop/chopchop.py \
   -Target "$TARGET_REGION" \
   -G "$genome_name" \
   -M NGG \
