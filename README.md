@@ -3,7 +3,7 @@
 ## Installation
 Use `./install.sh` to install most dependencies. The script is safe to rerun: it updates the `chopchop` Conda environment and reuses existing Git checkouts. It stops at the first failed command.
 
-The CHOPCHOP upstream repository is cloned from Bitbucket. If your account cannot access it, obtain a compatible checkout and either place it in `chopchop/` or set `CHOPCHOP_REPOSITORY` to an accessible Git URL before running the installer.
+The CHOPCHOP upstream repository is cloned from [GitHub](https://github.com/JokingHero/chopchop).
 
 You will also need to install the following R packages: `dplyr`, `readr`, `stringr`, `Biostrings`, `read.gb`.
 

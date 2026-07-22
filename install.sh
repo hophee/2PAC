@@ -3,7 +3,6 @@ set -uo pipefail
 
 readonly PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly ENV_FILE="$PROJECT_DIR/env.yml"
-readonly CHOPCHOP_REPOSITORY="${CHOPCHOP_REPOSITORY:-https://bitbucket.org/valenlab/chopchop.git}"
 readonly CALL_PRIMER3_URL="https://gist.githubusercontent.com/IdoBar/5e78ae7a5cc7277a04b126ce6f595d6e/raw/45c60662f3479f41765bce839835c4988a7e5b36/callPrimer3.R"
 
 declare -a FAILED_COMPONENTS=()
@@ -68,7 +67,7 @@ fi
 run_step "primer3 source" clone_if_missing https://github.com/primer3-org/primer3.git primer3
 run_step "primer3 build" make -C primer3/src
 run_step "virtualPCR source" clone_if_missing https://github.com/rkalendar/virtualPCR.git virtualPCR
-run_step "CHOPCHOP source" clone_if_missing "$CHOPCHOP_REPOSITORY" chopchop
+run_step "CHOPCHOP source" clone_if_missing https://github.com/JokingHero/chopchop.git chopchop
 run_step "callPrimer3.R" download_call_primer3
 
 if (( ${#FAILED_COMPONENTS[@]} == 0 )); then
@@ -76,6 +75,5 @@ if (( ${#FAILED_COMPONENTS[@]} == 0 )); then
 else
   printf '\nInstallation completed with missing components:\n' >&2
   printf '  - %s\n' "${FAILED_COMPONENTS[@]}" >&2
-  printf 'CHOPCHOP can be supplied with CHOPCHOP_REPOSITORY=<accessible Git URL>.\n' >&2
   exit 1
 fi
