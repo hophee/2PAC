@@ -57,6 +57,22 @@ download_call_primer3() {
   mv "$temporary_file" "$PROJECT_DIR/callPrimer3.R"
 }
 
+patch_chopchop_python2_pandas_compatibility() {
+  local chopchop_file="$PROJECT_DIR/chopchop/chopchop.py"
+  local old_call='args.backbone, args.replace5P, args.maxOffTargets, countMM, args.PAM,'
+  local new_call='args.backbone, args.replace5P, int(args.maxOffTargets), countMM, args.PAM,'
+
+  [[ -f "$chopchop_file" ]] || return 1
+  if grep -Fq "$new_call" "$chopchop_file"; then
+    return 0
+  fi
+  if ! grep -Fq "$old_call" "$chopchop_file"; then
+    printf 'ERROR: CHOPCHOP source line for maxOffTargets patch was not found.\n' >&2
+    return 1
+  fi
+  sed -i "s/${old_call}/${new_call}/" "$chopchop_file"
+}
+
 cd "$PROJECT_DIR"
 if command -v conda >/dev/null; then
   run_step "Conda environment chopchop" install_conda_environment
@@ -68,6 +84,7 @@ run_step "primer3 source" clone_if_missing https://github.com/primer3-org/primer
 run_step "primer3 build" make -C primer3/src
 run_step "virtualPCR source" clone_if_missing https://github.com/rkalendar/virtualPCR.git virtualPCR
 run_step "CHOPCHOP source" clone_if_missing https://github.com/JokingHero/chopchop.git chopchop
+run_step "CHOPCHOP Python 2/pandas compatibility" patch_chopchop_python2_pandas_compatibility
 run_step "callPrimer3.R" download_call_primer3
 
 if (( ${#FAILED_COMPONENTS[@]} == 0 )); then

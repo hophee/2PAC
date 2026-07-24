@@ -1,9 +1,17 @@
-tempo
-tempo/*
-callPrimer3.R
-.Rproj.user
+# IDE metadata
+/.Rproj.user/
 *.Rproj
-primer3/*
-primer3
-virtualPCR/*
-virtualPCR
+
+# Installed/downloaded dependencies
+/callPrimer3.R
+/chopchop/
+/primer3/
+/virtualPCR/
+
+# Local archival/work directory
+/tempo/
+/test/
+
+# Generated genome indexes
+*.2bit
+*.ebwt
