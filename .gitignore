@@ -10,7 +10,8 @@
 
 # Local archival/work directory
 /tempo/
-/test/
+/test/*
+!/test/test_run.sh
 
 # Generated genome indexes
 *.2bit

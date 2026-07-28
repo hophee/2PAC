@@ -4,6 +4,10 @@ set -uo pipefail
 readonly PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly ENV_FILE="$PROJECT_DIR/env.yml"
 readonly CALL_PRIMER3_URL="https://gist.githubusercontent.com/IdoBar/5e78ae7a5cc7277a04b126ce6f595d6e/raw/45c60662f3479f41765bce839835c4988a7e5b36/callPrimer3.R"
+readonly TEST_DIR="$PROJECT_DIR/test"
+readonly MG1655_REFSEQ_URL="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2"
+readonly MG1655_GENOME_URL="$MG1655_REFSEQ_URL/GCF_000005845.2_ASM584v2_genomic.fna.gz"
+readonly MG1655_GFF_URL="$MG1655_REFSEQ_URL/GCF_000005845.2_ASM584v2_genomic.gff.gz"
 
 declare -a FAILED_COMPONENTS=()
 
@@ -57,6 +61,36 @@ download_call_primer3() {
   mv "$temporary_file" "$PROJECT_DIR/callPrimer3.R"
 }
 
+download_gzip_if_missing() {
+  local url=$1
+  local destination=$2
+  local temporary_file
+
+  [[ -s "$destination" ]] && return 0
+  temporary_file="$(mktemp "$TEST_DIR/.download.XXXXXX.gz")" || return 1
+  if ! curl --fail --location --silent --show-error "$url" --output "$temporary_file"; then
+    rm -f "$temporary_file"
+    return 1
+  fi
+  if ! gzip -t "$temporary_file" || ! gzip -dc "$temporary_file" > "$destination"; then
+    rm -f "$temporary_file" "$destination"
+    return 1
+  fi
+  rm -f "$temporary_file"
+}
+
+prepare_test_data() {
+  mkdir -p "$TEST_DIR" || return 1
+  download_gzip_if_missing "$MG1655_GENOME_URL" "$TEST_DIR/MG1655.fna" || return 1
+  download_gzip_if_missing "$MG1655_GFF_URL" "$TEST_DIR/MG1655.gff" || return 1
+
+  if [[ ! -f "$TEST_DIR/test_run.sh" ]]; then
+    printf 'ERROR: test runner was not found: %s\n' "$TEST_DIR/test_run.sh" >&2
+    return 1
+  fi
+  chmod +x "$TEST_DIR/test_run.sh"
+}
+
 patch_chopchop_python2_pandas_compatibility() {
   local chopchop_file="$PROJECT_DIR/chopchop/chopchop.py"
   local old_call='args.backbone, args.replace5P, args.maxOffTargets, countMM, args.PAM,'
@@ -86,6 +120,7 @@ run_step "virtualPCR source" clone_if_missing https://github.com/rkalendar/virtu
 run_step "CHOPCHOP source" clone_if_missing https://github.com/JokingHero/chopchop.git chopchop
 run_step "CHOPCHOP Python 2/pandas compatibility" patch_chopchop_python2_pandas_compatibility
 run_step "callPrimer3.R" download_call_primer3
+run_step "MG1655 test data and test runner" prepare_test_data
 
 if (( ${#FAILED_COMPONENTS[@]} == 0 )); then
   printf 'Installation completed successfully.\n'
