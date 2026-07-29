@@ -5,21 +5,21 @@ Use `./install.sh` to install most dependencies. The script is safe to rerun: it
 
 The CHOPCHOP upstream repository is cloned from [GitHub](https://github.com/JokingHero/chopchop).
 
-You will also need to install the following R packages: `dplyr`, `readr`, `Biostrings`, `ape`.
+You will also need to install the following R packages: `argparser`, `dplyr`, `readr`, `Biostrings`, `ape`.
 
 ## Usage
 ```bash
 Rscript oligo_designer.R \
-  --genome genome.fasta --genome_annotation genome_annotation.tsv \
-  --target_plasmid pTarget.fasta --output_dir output_directory \
+  --genome genome.fasta --genome-annotation genome_annotation.tsv \
+  --target-plasmid pTarget.fasta --output-dir output_directory \
   --cds gene1,gene2 --ncrna rna1,rna2
 ```
 
 - `genome_annotation.tsv` accepted from [Bakta](https://github.com/oschwengers/bakta)
-  (`--annotation_format bakta`) or GFF/GFF3 (`--annotation_format gff`). Target
+  (`--annotation-format bakta`) or GFF/GFF3 (`--annotation-format gff`, the default). Target
   is first looked up in `locus_tag`, then in `gene`.
 - Gene names may be symbolic names or `Locus Tag` values. `--cds` and `--ncrna`
-  accept comma-separated lists and can be repeated.
+  accept comma-separated or space-separated lists.
 
 ## Output
 - `all_primers.fasta`: set of designed primers

@@ -16,3 +16,7 @@
 # Generated genome indexes
 *.2bit
 *.ebwt
+
+# Other
+/protocol.md
+/TECHNICAL_SPECIFICATION.md

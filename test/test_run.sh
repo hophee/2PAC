@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# After installation, run this script from the project root with:
-# conda run -n chopchop bash test/test_run.sh
 set -uo pipefail
 
-readonly TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly TEST_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+
+if [[ "${CONDA_DEFAULT_ENV:-}" != "chopchop" ]]; then
+  command -v conda >/dev/null 2>&1 || {
+    printf 'TEST FAILED: conda is not available in PATH\n' >&2
+    exit 1
+  }
+  exec conda run --no-capture-output --name chopchop bash "$TEST_SCRIPT" "$@"
+fi
+
+readonly TEST_DIR="$(dirname -- "$TEST_SCRIPT")"
 readonly PROJECT_DIR="$(cd -- "$TEST_DIR/.." && pwd)"
-readonly OUTPUT_DIR="$TEST_DIR/output"
+readonly OUTPUT_DIR="$TEST_DIR/test_output"
 readonly SUMMARY="$OUTPUT_DIR/design_summary.tsv"
 readonly PLASMID="$TEST_DIR/test_target_plasmid.fasta"
 readonly TEST_GENES="recA,pta,hupB"
@@ -28,10 +36,10 @@ cd "$PROJECT_DIR" || fail "cannot enter project directory"
 
 if ! Rscript oligo_designer.R \
   --genome "$TEST_DIR/MG1655.fna" \
-  --genome_annotation "$TEST_DIR/MG1655.gff" \
-  --annotation_format gff \
-  --target_plasmid "$PLASMID" \
-  --output_dir "$OUTPUT_DIR" \
+  --genome-annotation "$TEST_DIR/MG1655.gff" \
+  --annotation-format gff \
+  --target-plasmid "$PLASMID" \
+  --output-dir "$OUTPUT_DIR" \
   --cds "$TEST_GENES"; then
   fail "oligo_designer.R returned a non-zero exit code"
 fi
