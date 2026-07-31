@@ -3,6 +3,7 @@ set -uo pipefail
 
 readonly PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly ENV_FILE="$PROJECT_DIR/env.yml"
+readonly CONDA_ENV_NAME="oligo_design"
 readonly CALL_PRIMER3_URL="https://gist.githubusercontent.com/IdoBar/5e78ae7a5cc7277a04b126ce6f595d6e/raw/45c60662f3479f41765bce839835c4988a7e5b36/callPrimer3.R"
 readonly TEST_DIR="$PROJECT_DIR/test"
 readonly MG1655_REFSEQ_URL="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2"
@@ -43,8 +44,8 @@ install_conda_environment() {
   }
   eval "$(conda shell.bash hook)" || return 1
 
-  if conda env list | awk 'NR > 2 { print $1 }' | grep -qx chopchop; then
-    conda env update --name chopchop --file "$ENV_FILE" --prune
+  if conda env list | awk 'NR > 2 { print $1 }' | grep -Fqx "$CONDA_ENV_NAME"; then
+    conda env update --name "$CONDA_ENV_NAME" --file "$ENV_FILE" --prune
   else
     conda env create --file "$ENV_FILE" --yes
   fi
@@ -109,10 +110,11 @@ patch_chopchop_python2_pandas_compatibility() {
 
 cd "$PROJECT_DIR"
 if command -v conda >/dev/null; then
-  run_step "Conda environment chopchop" install_conda_environment
+  run_step "Conda environment $CONDA_ENV_NAME" install_conda_environment
 else
-  printf 'FAILED: Conda environment chopchop (conda was not found in PATH)\n' >&2
-  FAILED_COMPONENTS+=("Conda environment chopchop")
+  printf 'FAILED: Conda environment %s (conda was not found in PATH)\n' \
+    "$CONDA_ENV_NAME" >&2
+  FAILED_COMPONENTS+=("Conda environment $CONDA_ENV_NAME")
 fi
 run_step "primer3 source" clone_if_missing https://github.com/primer3-org/primer3.git primer3
 run_step "primer3 build" make -C primer3/src

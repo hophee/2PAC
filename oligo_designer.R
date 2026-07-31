@@ -147,6 +147,86 @@ parse_designer_args <- function(args) {
     "--virtual-pcr-jar",
     help = "Path to virtualPCR.jar"
   )
+  parser <- add_argument(
+    parser,
+    "--n20-mn",
+    help = "Minimum number of N20 sequences",
+    default = 1L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--n20-strands",
+    help = "N20 strand mode: plus, minus, both, or random",
+    default = "random"
+  )
+  parser <- add_argument(
+    parser,
+    "--n20-offtarget",
+    help = "Comma-separated maximum values for MM0, MM1, ...",
+    default = "0"
+  )
+  parser <- add_argument(
+    parser,
+    "--cds-fs",
+    help = "Require the deleted CDS fragment length to be divisible by three",
+    flag = TRUE
+  )
+  parser <- add_argument(
+    parser,
+    "--ncrna-fs",
+    help = "Require the deleted ncRNA fragment length to be divisible by three",
+    flag = TRUE
+  )
+  parser <- add_argument(
+    parser,
+    "--left-arm-min",
+    help = "Minimum left homology arm length",
+    default = 300L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--left-arm-opt",
+    help = "Preferred initial left homology arm length",
+    default = 350L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--left-arm-max",
+    help = "Maximum left homology arm length",
+    default = 400L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--right-arm-min",
+    help = "Minimum right homology arm length",
+    default = 400L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--right-arm-opt",
+    help = "Preferred initial right homology arm length",
+    default = 450L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--right-arm-max",
+    help = "Maximum right homology arm length",
+    default = 500L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--n20-arm-min-distance",
+    help = "Minimum distance from every N20 to both homology arms",
+    default = 40L,
+    type = "integer"
+  )
 
   normalize_scalar <- function(value) {
     if (is.null(value) || length(value) != 1L || is.na(value[[1]])) {
@@ -166,6 +246,44 @@ parse_designer_args <- function(args) {
     ))
     targets[nzchar(targets)]
   }
+  parse_offtarget_thresholds <- function(value) {
+    value <- normalize_scalar(value)
+    if (!length(value)) {
+      stop("--n20-offtarget не может быть пустым", call. = FALSE)
+    }
+    fields <- trimws(strsplit(value, ",", fixed = TRUE)[[1]])
+    if (!length(fields) || any(!nzchar(fields))) {
+      stop(
+        "--n20-offtarget должен быть списком целых чисел через запятую",
+        call. = FALSE
+      )
+    }
+    thresholds <- suppressWarnings(as.numeric(fields))
+    if (
+      anyNA(thresholds) ||
+        any(thresholds < 0) ||
+        any(thresholds != as.integer(thresholds))
+    ) {
+      stop(
+        "--n20-offtarget допускает только неотрицательные целые числа",
+        call. = FALSE
+      )
+    }
+    as.integer(thresholds)
+  }
+  validate_arm_lengths <- function(side, minimum, preferred, maximum) {
+    values <- c(minimum, preferred, maximum)
+    if (anyNA(values) || any(values < 1L) || !identical(values, sort(values))) {
+      stop(
+        sprintf(
+          "Для %s плеча требуется 0 < min <= opt <= max",
+          side
+        ),
+        call. = FALSE
+      )
+    }
+    as.integer(values)
+  }
 
   parsed <- parse_args(parser, args)
   annotation_format <- normalize_scalar(parsed$annotation_format)
@@ -176,6 +294,53 @@ parse_designer_args <- function(args) {
   if (!annotation_format %in% c("bakta", "gff")) {
     stop(
       "Некорректный --annotation-format. Допустимы: bakta, gff",
+      call. = FALSE
+    )
+  }
+  n20_mn <- as.integer(parsed$n20_mn)
+  if (length(n20_mn) != 1L || is.na(n20_mn) || n20_mn < 1L) {
+    stop("--n20-mn должен быть положительным целым числом", call. = FALSE)
+  }
+  n20_strands <- tolower(normalize_scalar(parsed$n20_strands))
+  strand_aliases <- c(
+    "+" = "plus",
+    "plus" = "plus",
+    "-" = "minus",
+    "minus" = "minus",
+    "both" = "both",
+    "any" = "random",
+    "random" = "random"
+  )
+  if (
+    length(n20_strands) != 1L ||
+      !n20_strands %in% names(strand_aliases)
+  ) {
+    stop(
+      "Некорректный --n20-strands. Допустимы: plus, minus, both, random",
+      call. = FALSE
+    )
+  }
+  n20_strands <- unname(strand_aliases[[n20_strands]])
+  left_arm <- validate_arm_lengths(
+    "левого",
+    parsed$left_arm_min,
+    parsed$left_arm_opt,
+    parsed$left_arm_max
+  )
+  right_arm <- validate_arm_lengths(
+    "правого",
+    parsed$right_arm_min,
+    parsed$right_arm_opt,
+    parsed$right_arm_max
+  )
+  n20_arm_min_distance <- as.integer(parsed$n20_arm_min_distance)
+  if (
+    length(n20_arm_min_distance) != 1L ||
+      is.na(n20_arm_min_distance) ||
+      n20_arm_min_distance < 0L
+  ) {
+    stop(
+      "--n20-arm-min-distance должен быть неотрицательным целым числом",
       call. = FALSE
     )
   }
@@ -191,7 +356,15 @@ parse_designer_args <- function(args) {
     annotation_format = annotation_format,
     chopchop_script = normalize_scalar(parsed$chopchop_script),
     primer3 = normalize_scalar(parsed$primer3),
-    virtual_pcr_jar = normalize_scalar(parsed$virtual_pcr_jar)
+    virtual_pcr_jar = normalize_scalar(parsed$virtual_pcr_jar),
+    n20_mn = n20_mn,
+    n20_strands = n20_strands,
+    n20_offtarget = parse_offtarget_thresholds(parsed$n20_offtarget),
+    cds_fs = isTRUE(parsed$cds_fs),
+    ncrna_fs = isTRUE(parsed$ncrna_fs),
+    left_arm = setNames(left_arm, c("min", "opt", "max")),
+    right_arm = setNames(right_arm, c("min", "opt", "max")),
+    n20_arm_min_distance = n20_arm_min_distance
   )
 
   required <- c("genome", "genome_annotation", "target_plasmid", "output_dir")
@@ -272,6 +445,16 @@ make_design_input <- function(cli) {
       } else {
         "virtualPCR/dist/virtualPCR.jar"
       }
+    ),
+    parameters = list(
+      n20_mn = cli$n20_mn,
+      n20_strands = cli$n20_strands,
+      n20_offtarget = cli$n20_offtarget,
+      cds_fs = cli$cds_fs,
+      ncrna_fs = cli$ncrna_fs,
+      left_arm = cli$left_arm,
+      right_arm = cli$right_arm,
+      n20_arm_min_distance = cli$n20_arm_min_distance
     )
   )
 }
@@ -454,43 +637,152 @@ run_chopchop <- function(
   interval
 }
 
-select_grnas <- function(table_path, feature, design_class, target_dir) {
+filter_grnas <- function(
+  table_path,
+  feature,
+  design_class,
+  offtarget_thresholds
+) {
   grnas <- read_tsv(table_path, show_col_types = FALSE) %>%
-    janitor::clean_names() %>%
+    janitor::clean_names()
+  required <- c(
+    "genomic_location",
+    "target_sequence",
+    "strand",
+    "self_complementarity"
+  )
+  missing <- setdiff(required, names(grnas))
+  if (length(missing)) {
+    stop(
+      sprintf(
+        "Таблица CHOPCHOP не содержит обязательные колонки: %s",
+        paste(missing, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+  mm_columns <- grep("^mm[0-9]+$", names(grnas), value = TRUE)
+  mm_columns <- mm_columns[order(as.integer(sub("^mm", "", mm_columns)))]
+  if (length(offtarget_thresholds) > length(mm_columns)) {
+    stop(
+      sprintf(
+        paste(
+          "--n20-offtarget содержит %d значений,",
+          "но CHOPCHOP вывел только %d колонок MM"
+        ),
+        length(offtarget_thresholds),
+        length(mm_columns)
+      ),
+      call. = FALSE
+    )
+  }
+  applied_mm_columns <- head(mm_columns, length(offtarget_thresholds))
+  keep_offtarget <- rep(TRUE, nrow(grnas))
+  for (i in seq_along(applied_mm_columns)) {
+    values <- suppressWarnings(as.numeric(grnas[[applied_mm_columns[[i]]]]))
+    keep_offtarget <- keep_offtarget &
+      !is.na(values) &
+      values <= offtarget_thresholds[[i]]
+  }
+  grnas <- grnas[keep_offtarget, , drop = FALSE] %>%
     mutate(
       genomic_start = as.numeric(sub("^.*:", "", genomic_location)),
-      genomic_end = genomic_start + 22
-    ) %>%
-    mutate(
+      genomic_end = genomic_start + 22L,
+      n20_start = genomic_start,
+      n20_end = genomic_start + 19L,
       mid_closeness = abs(
         (feature$start + feature$end) %/%
           2 -
-          (genomic_start + genomic_end) %/% 2
+          (n20_start + n20_end) %/% 2
       ) /
         feature$length
     ) %>%
-    filter(self_complementarity == 0, mm0 == 0)
+    filter(self_complementarity == 0)
+  if (anyNA(grnas$genomic_start)) {
+    stop(
+      "Не удалось разобрать genomic_location в таблице CHOPCHOP",
+      call. = FALSE
+    )
+  }
   if (design_class == "cds") {
     grnas <- filter(grnas, mid_closeness <= 0.18)
   }
-  candidates <- bind_rows(
-    filter(grnas, strand == "+") %>% slice_head(n = 2),
-    filter(grnas, strand == "-") %>% slice_head(n = 2)
-  ) %>%
-    arrange(mid_closeness) %>%
-    slice_head(n = 3)
-  if (nrow(candidates) < 3) {
-    stop("Недостаточно подходящих N20 (требуется 3)", call. = FALSE)
+  arrange(grnas, mid_closeness)
+}
+
+prepare_grna_pool <- function(grnas, n20_mn, strand_mode) {
+  if (n20_mn > 1L && strand_mode == "plus") {
+    grnas <- filter(grnas, strand == "+")
+  } else if (n20_mn > 1L && strand_mode == "minus") {
+    grnas <- filter(grnas, strand == "-")
   }
-  write_tsv(candidates, file.path(target_dir, "selected_n20_table.tsv"))
-  n20 <- DNAStringSet(substr(candidates$target_sequence, 1, 20))
-  names(n20) <- paste0(feature$display_name, "_n20_", seq_along(n20))
-  writeXStringSet(n20, file.path(target_dir, "selected_n20.fasta"))
+  if (nrow(grnas) < n20_mn) {
+    stop(
+      sprintf(
+        "Недостаточно подходящих N20: найдено %d, требуется не менее %d",
+        nrow(grnas),
+        n20_mn
+      ),
+      call. = FALSE
+    )
+  }
+  if (
+    n20_mn > 1L &&
+      strand_mode == "both" &&
+      (!any(grnas$strand == "+") || !any(grnas$strand == "-"))
+  ) {
+    stop(
+      "Для режима both нужны подходящие N20 на плюс- и минус-цепях",
+      call. = FALSE
+    )
+  }
+  grnas
+}
+
+visit_grna_sets <- function(grnas, n20_mn, strand_mode, visitor) {
+  selected_indices <- integer(n20_mn)
+  visit <- function(depth, first_index) {
+    if (depth > n20_mn) {
+      candidates <- grnas[selected_indices, , drop = FALSE]
+      if (
+        n20_mn > 1L &&
+          strand_mode == "both" &&
+          !all(c("+", "-") %in% candidates$strand)
+      ) {
+        return(NULL)
+      }
+      return(visitor(candidates))
+    }
+    remaining <- n20_mn - depth
+    last_index <- nrow(grnas) - remaining
+    for (index in seq.int(first_index, last_index)) {
+      selected_indices[[depth]] <<- index
+      result <- visit(depth + 1L, index + 1L)
+      if (!is.null(result)) {
+        return(result)
+      }
+    }
+    NULL
+  }
+  visit(1L, 1L)
+}
+
+selected_grnas <- function(candidates) {
   list(
     table = candidates,
-    range = range(c(candidates$genomic_start, candidates$genomic_end)) +
-      c(-40, 40)
+    n20_range = range(c(candidates$n20_start, candidates$n20_end))
   )
+}
+
+write_selected_grnas <- function(selected, feature, target_dir) {
+  write_tsv(
+    selected$table,
+    file.path(target_dir, "selected_n20_table.tsv")
+  )
+  n20 <- DNAStringSet(substr(selected$table$target_sequence, 1, 20))
+  names(n20) <- paste0(feature$display_name, "_n20_", seq_along(n20))
+  writeXStringSet(n20, file.path(target_dir, "selected_n20.fasta"))
+  invisible(selected)
 }
 
 write_primer3_settings <- function(path, left_length, right_length) {
@@ -557,7 +849,14 @@ add_genome_positions <- function(left, right, arm, plus_strand) {
   list(left = left, right = right)
 }
 
-choose_pair <- function(primers, plus_strand, feature, design_class) {
+choose_pair <- function(
+  primers,
+  plus_strand,
+  feature,
+  selected,
+  minimum_n20_distance,
+  restrict_frame_shift
+) {
   left <- primers$left
   right <- primers$right
   if (!nrow(left) || !nrow(right)) {
@@ -565,13 +864,32 @@ choose_pair <- function(primers, plus_strand, feature, design_class) {
   }
   if (plus_strand) {
     deleted <- outer(right$genome_start, left$genome_end, "-") - 1
+    lower_boundary <- matrix(
+      rep(left$genome_end, each = nrow(right)),
+      nrow = nrow(right)
+    )
+    upper_boundary <- matrix(
+      rep(right$genome_start, nrow(left)),
+      nrow = nrow(right)
+    )
   } else {
     deleted <- outer(left$genome_start, right$genome_end, "-") - 1
+    lower_boundary <- matrix(
+      rep(right$genome_end, each = nrow(left)),
+      nrow = nrow(left)
+    )
+    upper_boundary <- matrix(
+      rep(left$genome_start, nrow(right)),
+      nrow = nrow(left)
+    )
   }
-  eligible <- deleted < feature$length
-  # TODO: add the legacy fallback that shortens the bridge when no in-frame
-  # primer pair exists; the current CDS implementation requires %in% 3 == 0.
-  if (design_class == "cds") {
+  left_distance <- selected$n20_range[[1]] - lower_boundary - 1L
+  right_distance <- upper_boundary - selected$n20_range[[2]] - 1L
+  eligible <- deleted >= 0L &
+    deleted < feature$length &
+    left_distance >= minimum_n20_distance &
+    right_distance >= minimum_n20_distance
+  if (restrict_frame_shift) {
     eligible <- eligible & deleted %% 3 == 0
   }
   indices <- which(eligible)
@@ -595,50 +913,63 @@ design_homology_arms <- function(
   target_dir
 ) {
   interval <- cut_interval(feature, design_class, length(input$genome))
-  left_start <- if (feature$strand == "+") {
-    max(1L, interval[[1]] - 350L)
+  parameters <- input$parameters
+  left_limits <- parameters$left_arm
+  right_limits <- parameters$right_arm
+  minimum_n20_distance <- parameters$n20_arm_min_distance
+  restrict_frame_shift <- if (design_class == "cds") {
+    parameters$cds_fs
   } else {
-    interval[[2]] + 1L
-  }
-  left_end <- if (feature$strand == "+") {
-    interval[[1]] - 1L
-  } else {
-    min(length(input$genome), interval[[2]] + 350L)
-  }
-  right_start <- if (feature$strand == "+") {
-    interval[[2]] + 1L
-  } else {
-    max(1L, interval[[1]] - 450L)
-  }
-  right_end <- if (feature$strand == "+") {
-    min(length(input$genome), interval[[2]] + 450L)
-  } else {
-    interval[[1]] - 1L
+    parameters$ncrna_fs
   }
   settings <- file.path(target_dir, "primer3_settings.txt")
   write_primer3_settings(
     settings,
-    abs(left_end - left_start) + 1,
-    abs(right_end - right_start) + 1
+    left_limits[["max"]],
+    right_limits[["max"]]
   )
   if (!file.exists(input$tools$primer3)) {
     stop("primer3_core не найден", call. = FALSE)
   }
 
   for (attempt in seq_len(1000)) {
+    left_length <- min(
+      left_limits[["opt"]] + attempt - 1L,
+      left_limits[["max"]]
+    )
+    right_length <- min(
+      right_limits[["opt"]] + attempt - 1L,
+      right_limits[["max"]]
+    )
     if (feature$strand == "+") {
       left_end <- interval[[1]] - 1L
+      left_start <- max(1L, left_end - left_length + 1L)
       right_start <- interval[[2]] + 1L
+      right_end <- min(
+        length(input$genome),
+        right_start + right_length - 1L
+      )
       left_seq <- input$genome[left_start:left_end]
       right_seq <- input$genome[right_start:right_end]
     } else {
       right_end <- interval[[1]] - 1L
       left_start <- interval[[2]] + 1L
+      left_end <- min(
+        length(input$genome),
+        left_start + left_length - 1L
+      )
+      right_start <- max(1L, right_end - right_length + 1L)
       left_seq <- complement(reverse(input$genome[left_start:left_end]))
       right_seq <- complement(reverse(input$genome[right_start:right_end]))
     }
-    if (!length(left_seq) || !length(right_seq)) {
-      stop("Плечо гомологии пусто", call. = FALSE)
+    if (
+      length(left_seq) < left_limits[["min"]] ||
+        length(right_seq) < right_limits[["min"]]
+    ) {
+      stop(
+        "Граница генома не позволяет выдержать минимальную длину плеч",
+        call. = FALSE
+      )
     }
     writeXStringSet(
       DNAStringSet(c(left_arm = left_seq, right_arm = right_seq)),
@@ -648,7 +979,7 @@ design_homology_arms <- function(
     left <- tryCatch(
       callPrimer3(
         as.character(left_seq),
-        paste0("300-", length(left_seq)),
+        paste0(left_limits[["min"]], "-", length(left_seq)),
         tm,
         2,
         "left_arm",
@@ -663,7 +994,7 @@ design_homology_arms <- function(
     right <- tryCatch(
       callPrimer3(
         as.character(right_seq),
-        paste0("400-", length(right_seq)),
+        paste0(right_limits[["min"]], "-", length(right_seq)),
         tm,
         2,
         "right_arm",
@@ -687,11 +1018,24 @@ design_homology_arms <- function(
         positions,
         feature$strand == "+",
         feature,
-        design_class
+        selected,
+        minimum_n20_distance,
+        restrict_frame_shift
       )
       if (!is.null(pair)) {
+        pair_arm_lengths <- pair$PRIMER_RIGHT_pos -
+          pair$PRIMER_LEFT_pos +
+          1L
+        valid_arm_lengths <- pair_arm_lengths[[1]] >= left_limits[["min"]] &&
+          pair_arm_lengths[[1]] <= left_limits[["max"]] &&
+          pair_arm_lengths[[2]] >= right_limits[["min"]] &&
+          pair_arm_lengths[[2]] <= right_limits[["max"]]
         ticks <- sort(unlist(pair[, c("genome_start", "genome_end")]))
-        if (ticks[[2]] >= feature$start && ticks[[3]] <= feature$end) {
+        if (
+          valid_arm_lengths &&
+            ticks[[2]] >= feature$start &&
+            ticks[[3]] <= feature$end
+        ) {
           write_tsv(
             bind_rows(positions$left, positions$right),
             file.path(target_dir, "primer3_table.tsv")
@@ -707,15 +1051,17 @@ design_homology_arms <- function(
       }
     }
     interval <- interval + c(1L, -1L)
+    required_deletion <- selected$n20_range +
+      c(-minimum_n20_distance - 1L, minimum_n20_distance + 1L)
     if (
-      interval[[1]] > selected$range[[1]] ||
-        interval[[2]] < selected$range[[2]] ||
+      interval[[1]] > required_deletion[[1]] ||
+        interval[[2]] < required_deletion[[2]] ||
         diff(interval) + 1 < feature$length * .3
     ) {
       break
     }
   }
-  stop("Не удалось подобрать праймеры для плеч гомологии", call. = FALSE)
+  NULL
 }
 
 write_design_outputs <- function(
@@ -729,13 +1075,20 @@ write_design_outputs <- function(
   pair <- arms$pair
   gap <- arms$ticks[[3]] - arms$ticks[[2]] - 1L
   bridge <- "ATGACTGCCCGCAAG"
-  frame_status <- "not_applicable"
+  restrict_frame_shift <- if (design_class == "cds") {
+    input$parameters$cds_fs
+  } else {
+    input$parameters$ncrna_fs
+  }
+  frame_status <- if (restrict_frame_shift) {
+    "divisible_by_three"
+  } else {
+    "not_restricted"
+  }
   if (design_class == "cds") {
     bridge <- substr(bridge, 1, 15 - (gap %% 3))
-    frame_status <- if (gap %% 3 == 0) {
-      "in-frame"
-    } else {
-      sprintf("bridge shortened to %d nt", nchar(bridge))
+    if (!restrict_frame_shift && gap %% 3 != 0) {
+      frame_status <- sprintf("bridge shortened to %d nt", nchar(bridge))
     }
   }
   bridge_rc <- as.character(complement(reverse(DNAString(bridge))))
@@ -840,8 +1193,26 @@ write_design_outputs <- function(
     c(
       paste("target", feature$query_name, sep = "\t"),
       paste("class", design_class, sep = "\t"),
+      paste("n20_count", nrow(selected$table), sep = "\t"),
+      paste(
+        "n20_strands",
+        paste(sort(unique(selected$table$strand)), collapse = ","),
+        sep = "\t"
+      ),
+      paste(
+        "n20_offtarget_thresholds",
+        paste(input$parameters$n20_offtarget, collapse = ","),
+        sep = "\t"
+      ),
+      paste(
+        "n20_arm_min_distance",
+        input$parameters$n20_arm_min_distance,
+        sep = "\t"
+      ),
       paste("deleted_nt", gap, sep = "\t"),
       paste("frame_status", frame_status, sep = "\t"),
+      paste("left_arm_nt", length(final_arms[[1]]), sep = "\t"),
+      paste("right_arm_nt", length(final_arms[[2]]), sep = "\t"),
       paste("left_primer_tm", round(pair$PRIMER_LEFT_TM[[1]], 1), sep = "\t"),
       paste("right_primer_tm", round(pair$PRIMER_RIGHT_TM[[2]], 1), sep = "\t"),
       paste(
@@ -918,40 +1289,292 @@ run_virtual_pcr <- function(input, target_dir, primer_paths) {
   invisible(TRUE)
 }
 
+append_design_log <- function(log_path, stage, status, detail = "") {
+  line <- paste(
+    format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+    stage,
+    status,
+    detail,
+    sep = "\t"
+  )
+  cat(line, "\n", file = log_path, append = TRUE, sep = "")
+}
+
+run_design_stage <- function(stage, log_path, expression) {
+  append_design_log(log_path, stage, "START")
+  tryCatch(
+    {
+      value <- force(expression)
+      append_design_log(log_path, stage, "OK")
+      value
+    },
+    error = function(e) {
+      reason <- conditionMessage(e)
+      error_stage <- if (!is.null(e$stage)) e$stage else stage
+      append_design_log(log_path, error_stage, "ERROR", reason)
+      stop(structure(
+        list(
+          message = reason,
+          call = NULL,
+          stage = error_stage,
+          parent = e
+        ),
+        class = c("design_stage_error", "error", "condition")
+      ))
+    }
+  )
+}
+
+design_from_grna_pool <- function(
+  input,
+  feature,
+  grnas,
+  design_class,
+  target_dir,
+  log_path
+) {
+  attempted_ranges <- new.env(parent = emptyenv())
+  attempts <- 0L
+  last_failure_stage <- "homology_arms"
+  result <- visit_grna_sets(
+    grnas,
+    input$parameters$n20_mn,
+    input$parameters$n20_strands,
+    function(candidates) {
+      selected <- selected_grnas(candidates)
+      range_key <- paste(selected$n20_range, collapse = ":")
+      if (exists(range_key, envir = attempted_ranges, inherits = FALSE)) {
+        return(NULL)
+      }
+      assign(range_key, TRUE, envir = attempted_ranges)
+      attempts <<- attempts + 1L
+      detail <- sprintf(
+        "set=%d;n20=%s;range=%s",
+        attempts,
+        paste(candidates$genomic_location, collapse = ","),
+        range_key
+      )
+      append_design_log(log_path, "homology_arms", "TRY", detail)
+      arms <- design_homology_arms(
+        input,
+        feature,
+        selected,
+        design_class,
+        target_dir
+      )
+      if (is.null(arms)) {
+        last_failure_stage <<- "homology_arms"
+        append_design_log(
+          log_path,
+          "homology_arms",
+          "REJECTED",
+          sprintf("set=%d", attempts)
+        )
+        return(NULL)
+      }
+      append_design_log(
+        log_path,
+        "design_outputs",
+        "TRY",
+        sprintf("set=%d", attempts)
+      )
+      output_attempt <- tryCatch(
+        list(
+          ok = TRUE,
+          value = write_design_outputs(
+            input,
+            feature,
+            selected,
+            arms,
+            design_class,
+            target_dir
+          )
+        ),
+        error = function(e) list(ok = FALSE, error = e)
+      )
+      if (!output_attempt$ok) {
+        last_failure_stage <<- "design_outputs"
+        append_design_log(
+          log_path,
+          "design_outputs",
+          "REJECTED",
+          sprintf(
+            "set=%d;reason=%s",
+            attempts,
+            conditionMessage(output_attempt$error)
+          )
+        )
+        return(NULL)
+      }
+      append_design_log(
+        log_path,
+        "design_outputs",
+        "OK",
+        sprintf("set=%d", attempts)
+      )
+      list(
+        selected = selected,
+        arms = arms,
+        primer_paths = output_attempt$value,
+        attempts = attempts
+      )
+    }
+  )
+  if (is.null(result)) {
+    reason <- sprintf(
+      paste(
+        "Не удалось завершить дизайн ни для одного допустимого набора N20",
+        "(проверено уникальных диапазонов: %d)"
+      ),
+      attempts
+    )
+    stop(structure(
+      list(
+        message = reason,
+        call = NULL,
+        stage = last_failure_stage
+      ),
+      class = c("grna_sets_exhausted", "error", "condition")
+    ))
+  }
+  result
+}
+
+write_target_error <- function(
+  path,
+  gene_name,
+  design_class,
+  stage,
+  reason
+) {
+  writeLines(
+    c(
+      paste("timestamp", format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"), sep = "\t"),
+      paste("gene", gene_name, sep = "\t"),
+      paste("class", design_class, sep = "\t"),
+      paste("stage", stage, sep = "\t"),
+      paste("reason", reason, sep = "\t")
+    ),
+    path
+  )
+}
+
 design_target <- function(input, genome_name, gene_name, design_class) {
-  feature <- feature_record(input, gene_name)
   safe_name <- tolower(gsub("[^A-Za-z0-9_.-]", "_", gene_name))
   target_dir <- file.path(input$output_dir, paste0(safe_name, "_results"))
   dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
+  log_path <- file.path(target_dir, "design.log")
+  error_path <- file.path(target_dir, "error.txt")
+  writeLines(
+    paste(
+      format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+      "target",
+      "START",
+      sprintf("gene=%s;class=%s", gene_name, design_class),
+      sep = "\t"
+    ),
+    log_path
+  )
+  if (file.exists(error_path)) {
+    unlink(error_path)
+  }
   message(sprintf("[%s] %s", design_class, gene_name))
-  run_chopchop(input, genome_name, feature, design_class, target_dir)
-  selected <- select_grnas(
-    file.path(target_dir, "n20_table.tsv"),
-    feature,
-    design_class,
-    target_dir
-  )
-  arms <- design_homology_arms(
-    input,
-    feature,
-    selected,
-    design_class,
-    target_dir
-  )
-  primer_paths <- write_design_outputs(
-    input,
-    feature,
-    selected,
-    arms,
-    design_class,
-    target_dir
-  )
-  run_virtual_pcr(input, target_dir, primer_paths)
-  data.frame(
-    gene = gene_name,
-    class = design_class,
-    output_dir = target_dir,
-    status = "ok"
+  tryCatch(
+    {
+      feature <- run_design_stage(
+        "feature_lookup",
+        log_path,
+        feature_record(input, gene_name)
+      )
+      run_design_stage(
+        "chopchop",
+        log_path,
+        run_chopchop(
+          input,
+          genome_name,
+          feature,
+          design_class,
+          target_dir
+        )
+      )
+      grnas <- run_design_stage(
+        "n20_filter",
+        log_path,
+        filter_grnas(
+          file.path(target_dir, "n20_table.tsv"),
+          feature,
+          design_class,
+          input$parameters$n20_offtarget
+        )
+      )
+      grnas <- run_design_stage(
+        "n20_pool",
+        log_path,
+        prepare_grna_pool(
+          grnas,
+          input$parameters$n20_mn,
+          input$parameters$n20_strands
+        )
+      )
+      design <- run_design_stage(
+        "homology_arms",
+        log_path,
+        design_from_grna_pool(
+          input,
+          feature,
+          grnas,
+          design_class,
+          target_dir,
+          log_path
+        )
+      )
+      run_design_stage(
+        "n20_output",
+        log_path,
+        write_selected_grnas(design$selected, feature, target_dir)
+      )
+      run_design_stage(
+        "virtual_pcr",
+        log_path,
+        run_virtual_pcr(input, target_dir, design$primer_paths)
+      )
+      append_design_log(log_path, "target", "OK")
+      data.frame(
+        gene = gene_name,
+        class = design_class,
+        output_dir = target_dir,
+        status = "ok",
+        stage = NA_character_,
+        reason = NA_character_
+      )
+    },
+    error = function(e) {
+      stage <- if (inherits(e, "design_stage_error")) {
+        e$stage
+      } else {
+        "unknown"
+      }
+      reason <- conditionMessage(e)
+      write_target_error(
+        error_path,
+        gene_name,
+        design_class,
+        stage,
+        reason
+      )
+      append_design_log(log_path, "target", "ERROR", paste(stage, reason))
+      stop(structure(
+        list(
+          message = reason,
+          call = NULL,
+          gene = gene_name,
+          design_class = design_class,
+          stage = stage,
+          target_dir = target_dir
+        ),
+        class = c("target_design_error", "error", "condition")
+      ))
+    }
   )
 }
 
@@ -976,17 +1599,30 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
         targets$class[[i]]
       ),
       error = function(e) {
+        stage <- if (inherits(e, "target_design_error")) {
+          e$stage
+        } else {
+          "unknown"
+        }
+        output_dir <- if (inherits(e, "target_design_error")) {
+          e$target_dir
+        } else {
+          NA_character_
+        }
         message(sprintf(
-          "[ERROR] %s (%s): %s",
+          "[ERROR] gene=%s class=%s stage=%s: %s",
           targets$gene[[i]],
           targets$class[[i]],
+          stage,
           conditionMessage(e)
         ))
         data.frame(
           gene = targets$gene[[i]],
           class = targets$class[[i]],
-          output_dir = NA_character_,
-          status = conditionMessage(e)
+          output_dir = output_dir,
+          status = "error",
+          stage = stage,
+          reason = conditionMessage(e)
         )
       }
     )

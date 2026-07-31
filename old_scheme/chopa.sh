@@ -2,7 +2,7 @@
 #source: https://github.com/hophee/2PAC
 
 eval "$(conda shell.bash hook)"
-conda activate chopchop
+conda activate oligo_design
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {

@@ -10,8 +10,14 @@
 
 # Local archival/work directory
 /tempo/
+/WORKING_NOTES.md
 /test/*
 !/test/test_run.sh
+!/test/test_unit.R
+
+# Local technical specifications and dated archives
+/TECHNICAL_SPECIFICATION.md
+/old_descriptions/
 
 # Generated genome indexes
 *.2bit
@@ -19,4 +25,3 @@
 
 # Other
 /protocol.md
-/TECHNICAL_SPECIFICATION.md

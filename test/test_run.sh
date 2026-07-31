@@ -2,13 +2,15 @@
 set -uo pipefail
 
 readonly TEST_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+readonly CONDA_ENV_NAME="oligo_design"
 
-if [[ "${CONDA_DEFAULT_ENV:-}" != "chopchop" ]]; then
+if [[ "${CONDA_DEFAULT_ENV:-}" != "$CONDA_ENV_NAME" ]]; then
   command -v conda >/dev/null 2>&1 || {
     printf 'TEST FAILED: conda is not available in PATH\n' >&2
     exit 1
   }
-  exec conda run --no-capture-output --name chopchop bash "$TEST_SCRIPT" "$@"
+  exec conda run --no-capture-output --name "$CONDA_ENV_NAME" \
+    bash "$TEST_SCRIPT" "$@"
 fi
 
 readonly TEST_DIR="$(dirname -- "$TEST_SCRIPT")"
@@ -34,6 +36,8 @@ EOF
 rm -rf "$OUTPUT_DIR"
 cd "$PROJECT_DIR" || fail "cannot enter project directory"
 
+Rscript test/test_unit.R || fail "unit tests failed"
+
 if ! Rscript oligo_designer.R \
   --genome "$TEST_DIR/MG1655.fna" \
   --genome-annotation "$TEST_DIR/MG1655.gff" \
@@ -51,7 +55,7 @@ for gene in recA pta hupB; do
     fail "$gene is not marked as successful in design_summary.tsv"
 
   target_dir="$OUTPUT_DIR/${gene,,}_results"
-  for result in all_primers.fasta edited_genome.fasta report.tsv n20_table.tsv; do
+  for result in all_primers.fasta edited_genome.fasta report.tsv n20_table.tsv design.log; do
     [[ -s "$target_dir/$result" ]] || fail "missing or empty result for $gene: $result"
   done
 done
