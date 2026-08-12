@@ -54,7 +54,7 @@ read_genome_annotation <- function(path, format = "bakta") {
     )
   } else {
     stop(
-      "Неподдерживаемый формат аннотации. Допустимы: bakta, gff",
+      "Неподдерживаемый формат аннотации. Допустимы: tsv (bakta), gff",
       call. = FALSE
     )
   }
@@ -71,6 +71,12 @@ read_genome_annotation <- function(path, format = "bakta") {
   }
   if (!"seqid" %in% names(annotation) && "sequence_id" %in% names(annotation)) {
     annotation$seqid <- as.character(annotation$sequence_id)
+  }
+  if (!"seqid" %in% names(annotation)) {
+    stop(
+      "Аннотация не содержит колонку seqid или sequence_id",
+      call. = FALSE
+    )
   }
   annotation
 }

@@ -64,5 +64,3 @@ design class, failed stage, and reason. Other targets continue to run and the
 failure is recorded in `design_summary.tsv`.
 
 The implementation still supports one complete linear genome contig only.
-See `TECHNICAL_SPECIFICATION.md` for the full current contract and known
-limitations.
