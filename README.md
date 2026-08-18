@@ -46,21 +46,42 @@ only when every supplied threshold is met.
 
 ## Output
 
-The output root contains `design_summary.tsv`. Each target has a
-`<target>_results/` directory containing, among other intermediate files:
+The output root is split by audience:
 
-- `selected_n20_table.tsv` and `selected_n20.fasta`;
-- `homology_arms.fasta`;
-- `all_primers.fasta`;
-- `primers_without_service_sequences.fasta`;
-- `screening_primers.fasta`;
-- `edited_genome.fasta`;
-- `report.tsv`;
-- virtualPCR reports;
-- `design.log`.
+```text
+results/
+├── WetLab/
+│   └── <target>_results/
+│       ├── final_sequences.fasta
+│       ├── final_sequences.txt
+│       └── wet_lab_report.txt
+└── TechReport/
+    ├── design_summary.tsv
+    ├── run_parameters.tsv
+    └── <target>_results/
+        └── ... pipeline outputs, tool reports, and logs
+```
 
-If a target fails, its directory also contains `error.txt` with the gene,
-design class, failed stage, and reason. Other targets continue to run and the
-failure is recorded in `design_summary.tsv`.
+`final_sequences.fasta` and `final_sequences.txt` contain the same complete
+oligonucleotide set: forward N20 oligos, the common reverse sgRNA oligo, four
+homology-arm primers, and two screening primers. `wet_lab_report.txt` lists
+the annealing-region Tm values and the expected screening PCR product sizes
+for the unedited (unsuccessful insertion) and edited (successful insertion)
+alleles. A target-specific WetLab directory is written only after all design
+and virtualPCR stages succeed.
+
+`TechReport/` contains everything needed for traceability: CHOPCHOP, Primer3,
+and virtualPCR products, the edited-genome model, intermediate FASTA/TSV
+files, genome indexes, a CHOPCHOP configuration snapshot, `report.tsv`, and
+`design.log`. `run_parameters.tsv` records input file paths, target lists, N20
+and homology-arm settings, external tool paths, and the Primer3 buffer
+concentrations used for Tm calculation (50 mM monovalent salt, 1.5 mM
+divalent salt, 0.6 mM dNTP, and 50 nM DNA).
+
+If a target fails, its `TechReport/<target>_results/` directory also contains
+`error.txt` with the gene, design class, failed stage, and reason. Other
+targets continue to run and the failure is recorded in
+`TechReport/design_summary.tsv`; no new WetLab result is created for that
+failed target.
 
 The implementation still supports one complete linear genome contig only.

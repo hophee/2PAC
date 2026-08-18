@@ -27,7 +27,7 @@ read_genome_annotation <- function(path, format = "bakta") {
     lines <- readLines(path)
     hash_lines <- grep("^#", lines)
     skip_lines <- if (length(hash_lines)) max(hash_lines) - 1 else 0
-    annotation <- read_tsv(path, skip = skip_lines, show_col_types = FALSE) %>%
+    annotation <- read_tsv(path, skip = skip_lines, show_col_types = FALSE) |>
       janitor::clean_names()
   } else if (format == "gff") {
     gff <- ape::read.gff(path)
@@ -140,18 +140,26 @@ parse_designer_args <- function(args) {
   parser <- add_argument(
     parser,
     "--annotation-format",
-    help = "Annotation format: bakta or gff"
+    help = "Annotation format: bakta or gff",
+    default = "gff"
   )
   parser <- add_argument(
     parser,
     "--chopchop-script",
-    help = "Path to chopchop.py"
+    help = "Path to chopchop.py",
+    default = "chopchop/chopchop.py"
   )
-  parser <- add_argument(parser, "--primer3", help = "Path to primer3_core")
+  parser <- add_argument(
+    parser,
+    "--primer3",
+    help = "Path to primer3_core",
+    default = "primer3/src/primer3_core"
+  )
   parser <- add_argument(
     parser,
     "--virtual-pcr-jar",
-    help = "Path to virtualPCR.jar"
+    help = "Path to virtualPCR.jar",
+    default = "virtualPCR/dist/virtualPCR.jar"
   )
   parser <- add_argument(
     parser,
@@ -250,7 +258,7 @@ parse_designer_args <- function(args) {
       strsplit(value, ",", fixed = TRUE),
       use.names = FALSE
     ))
-    targets[nzchar(targets)]
+    unique(targets[nzchar(targets)])
   }
   parse_offtarget_thresholds <- function(value) {
     value <- normalize_scalar(value)
@@ -292,11 +300,7 @@ parse_designer_args <- function(args) {
   }
 
   parsed <- parse_args(parser, args)
-  annotation_format <- normalize_scalar(parsed$annotation_format)
-  if (!length(annotation_format)) {
-    annotation_format <- "gff"
-  }
-  annotation_format <- tolower(annotation_format)
+  annotation_format <- tolower(normalize_scalar(parsed$annotation_format))
   if (!annotation_format %in% c("bakta", "gff")) {
     stop(
       "Некорректный --annotation-format. Допустимы: bakta, gff",
@@ -395,14 +399,6 @@ parse_designer_args <- function(args) {
   values
 }
 
-split_gene_list <- function(values) {
-  if (!length(values)) {
-    return(character())
-  }
-  genes <- trimws(unlist(strsplit(values, ",", fixed = TRUE)))
-  unique(genes[nzchar(genes)])
-}
-
 run_tool <- function(command, args, stdout = "", stderr = "") {
   status <- system2(command, args = args, stdout = stdout, stderr = stderr)
   if (status != 0) {
@@ -414,43 +410,105 @@ run_tool <- function(command, args, stdout = "", stderr = "") {
   invisible(TRUE)
 }
 
+primer3_buffer_parameters <- function() {
+  c(
+    monovalent_salt_mm = 50,
+    divalent_salt_mm = 1.5,
+    dntp_mm = 0.6,
+    dna_nm = 50
+  )
+}
+
+output_layout <- function(output_dir) {
+  list(
+    wet_lab = file.path(output_dir, "WetLab"),
+    tech_report = file.path(output_dir, "TechReport")
+  )
+}
+
+write_run_parameters <- function(input, targets, path) {
+  parameters <- c(
+    generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+    genome_file = input$genome_path,
+    genome_annotation_file = input$annotation_path,
+    annotation_format = input$annotation_format,
+    target_plasmid_file = input$target_plasmid,
+    cas_plasmid_file = if (is.null(input$cas_plasmid)) NA_character_ else {
+      input$cas_plasmid
+    },
+    cds_targets = paste(targets$gene[targets$class == "cds"], collapse = ","),
+    ncrna_targets = paste(
+      targets$gene[targets$class == "ncrna"],
+      collapse = ","
+    ),
+    output_directory = input$output_dir,
+    genome_index_directory = file.path(
+      output_layout(input$output_dir)$tech_report,
+      "genome_indexes"
+    ),
+    chopchop_script = input$tools$chopchop_script,
+    chopchop_config_snapshot = file.path(
+      output_layout(input$output_dir)$tech_report,
+      "chopchop_config.json"
+    ),
+    primer3_executable = input$tools$primer3,
+    primer3_thermodynamic_parameters = input$tools$primer3_config,
+    virtual_pcr_jar = input$tools$virtual_pcr_jar,
+    n20_count = input$parameters$n20_mn,
+    n20_strands = input$parameters$n20_strands,
+    n20_offtarget_thresholds = paste(
+      input$parameters$n20_offtarget,
+      collapse = ","
+    ),
+    cds_frame_restriction = input$parameters$cds_fs,
+    ncrna_frame_restriction = input$parameters$ncrna_fs,
+    setNames(
+      input$parameters$left_arm,
+      paste0("left_arm_", names(input$parameters$left_arm), "_nt")
+    ),
+    setNames(
+      input$parameters$right_arm,
+      paste0("right_arm_", names(input$parameters$right_arm), "_nt")
+    ),
+    n20_arm_min_distance_nt = input$parameters$n20_arm_min_distance,
+    setNames(
+      input$parameters$primer3_buffer,
+      paste0("primer3_buffer_", names(input$parameters$primer3_buffer))
+    )
+  )
+  write_tsv(
+    data.frame(
+      parameter = names(parameters),
+      value = unname(as.character(parameters)),
+      stringsAsFactors = FALSE
+    ),
+    path
+  )
+  invisible(path)
+}
+
 make_design_input <- function(cli) {
-  annotation_format <- if (length(cli$annotation_format)) {
-    cli$annotation_format[[1]]
-  } else {
-    "bakta"
-  }
   # TODO: only a complete single-contig bacterial genome is supported for now.
   # Multi-contig FASTA/GFF input needs contig-aware sequence extraction.
   genome_set <- readDNAStringSet(cli$genome[[1]], nrec = 1)
   list(
     genome_path = cli$genome[[1]],
+    annotation_path = cli$genome_annotation[[1]],
+    annotation_format = cli$annotation_format[[1]],
     genome = genome_set[[1]],
     genome_contig = names(genome_set)[[1]],
     annotation = read_genome_annotation(
       cli$genome_annotation[[1]],
-      annotation_format
+      cli$annotation_format[[1]]
     ),
     target_plasmid = cli$target_plasmid[[1]],
     cas_plasmid = if (length(cli$cas_plasmid)) cli$cas_plasmid[[1]] else NULL,
     output_dir = cli$output_dir[[1]],
     tools = list(
-      chopchop_script = if (length(cli$chopchop_script)) {
-        cli$chopchop_script[[1]]
-      } else {
-        "chopchop/chopchop.py"
-      },
-      primer3 = if (length(cli$primer3)) {
-        cli$primer3[[1]]
-      } else {
-        "primer3/src/primer3_core"
-      },
+      chopchop_script = cli$chopchop_script[[1]],
+      primer3 = cli$primer3[[1]],
       primer3_config = "primer3/src/primer3_config",
-      virtual_pcr_jar = if (length(cli$virtual_pcr_jar)) {
-        cli$virtual_pcr_jar[[1]]
-      } else {
-        "virtualPCR/dist/virtualPCR.jar"
-      }
+      virtual_pcr_jar = cli$virtual_pcr_jar[[1]]
     ),
     parameters = list(
       n20_mn = cli$n20_mn,
@@ -460,7 +518,8 @@ make_design_input <- function(cli) {
       ncrna_fs = cli$ncrna_fs,
       left_arm = cli$left_arm,
       right_arm = cli$right_arm,
-      n20_arm_min_distance = cli$n20_arm_min_distance
+      n20_arm_min_distance = cli$n20_arm_min_distance,
+      primer3_buffer = primer3_buffer_parameters()
     )
   )
 }
@@ -468,11 +527,7 @@ make_design_input <- function(cli) {
 feature_record <- function(input, gene_name) {
   idx <- find_target_feature(input$annotation, gene_name)
   row <- input$annotation[idx, , drop = FALSE]
-  contig <- if ("seqid" %in% names(input$annotation)) {
-    as.character(row$seqid[[1]])
-  } else {
-    NA_character_
-  }
+  contig <- as.character(row$seqid[[1]])
   candidates <- input$annotation
   if (!is.na(contig)) {
     candidates <- filter(candidates, seqid == contig)
@@ -534,16 +589,21 @@ cut_interval <- function(feature, design_class, genome_length) {
 
 prepare_chopchop_assets <- function(input) {
   genome_name <- tools::file_path_sans_ext(basename(input$genome_path))
-  genome_dir <- dirname(normalizePath(input$genome_path))
-  two_bit <- file.path(genome_dir, paste0(genome_name, ".2bit"))
-  bowtie_prefix <- file.path(genome_dir, genome_name)
+  index_dir <- file.path(
+    output_layout(input$output_dir)$tech_report,
+    "genome_indexes"
+  )
+  dir.create(index_dir, recursive = TRUE, showWarnings = FALSE)
+  index_dir <- normalizePath(index_dir)
+  two_bit <- file.path(index_dir, paste0(genome_name, ".2bit"))
+  bowtie_prefix <- file.path(index_dir, genome_name)
   if (!file.exists(two_bit)) {
     run_tool("faToTwoBit", c(input$genome_path, two_bit))
   }
   if (!file.exists(paste0(bowtie_prefix, ".1.ebwt"))) {
     run_tool("bowtie-build", c(input$genome_path, bowtie_prefix))
   }
-  list(name = genome_name, directory = genome_dir)
+  list(name = genome_name, directory = index_dir)
 }
 
 configure_chopchop <- function(input, genome_assets) {
@@ -649,7 +709,7 @@ filter_grnas <- function(
   design_class,
   offtarget_thresholds
 ) {
-  grnas <- read_tsv(table_path, show_col_types = FALSE) %>%
+  grnas <- read_tsv(table_path, show_col_types = FALSE) |>
     janitor::clean_names()
   required <- c(
     "genomic_location",
@@ -690,7 +750,7 @@ filter_grnas <- function(
       !is.na(values) &
       values <= offtarget_thresholds[[i]]
   }
-  grnas <- grnas[keep_offtarget, , drop = FALSE] %>%
+  grnas <- grnas[keep_offtarget, , drop = FALSE] |>
     mutate(
       genomic_start = as.numeric(sub("^.*:", "", genomic_location)),
       genomic_end = genomic_start + 22L,
@@ -702,7 +762,7 @@ filter_grnas <- function(
           (n20_start + n20_end) %/% 2
       ) /
         feature$length
-    ) %>%
+    ) |>
     filter(self_complementarity == 0)
   if (anyNA(grnas$genomic_start)) {
     stop(
@@ -773,13 +833,6 @@ visit_grna_sets <- function(grnas, n20_mn, strand_mode, visitor) {
   visit(1L, 1L)
 }
 
-selected_grnas <- function(candidates) {
-  list(
-    table = candidates,
-    n20_range = range(c(candidates$n20_start, candidates$n20_end))
-  )
-}
-
 write_selected_grnas <- function(selected, feature, target_dir) {
   write_tsv(
     selected$table,
@@ -791,7 +844,12 @@ write_selected_grnas <- function(selected, feature, target_dir) {
   invisible(selected)
 }
 
-write_primer3_settings <- function(path, left_length, right_length) {
+write_primer3_settings <- function(
+  path,
+  left_length,
+  right_length,
+  buffer = primer3_buffer_parameters()
+) {
   product <- round(c(
     min(left_length, right_length),
     max(left_length, right_length) * 1.5
@@ -811,6 +869,10 @@ write_primer3_settings <- function(path, left_length, right_length) {
       "PRIMER_MIN_TM=59.0",
       "PRIMER_OPT_TM=60.0",
       "PRIMER_MAX_TM=61.0",
+      paste0("PRIMER_SALT_MONOVALENT=", buffer[["monovalent_salt_mm"]]),
+      paste0("PRIMER_SALT_DIVALENT=", buffer[["divalent_salt_mm"]]),
+      paste0("PRIMER_DNTP_CONC=", buffer[["dntp_mm"]]),
+      paste0("PRIMER_DNA_CONC=", buffer[["dna_nm"]]),
       "PRIMER_PAIR_MAX_DIFF_TM=8.0",
       "PRIMER_MIN_GC=40.0",
       "PRIMER_MAX_GC=60.0",
@@ -932,7 +994,8 @@ design_homology_arms <- function(
   write_primer3_settings(
     settings,
     left_limits[["max"]],
-    right_limits[["max"]]
+    right_limits[["max"]],
+    input$parameters$primer3_buffer
   )
   if (!file.exists(input$tools$primer3)) {
     stop("primer3_core не найден", call. = FALSE)
@@ -1070,6 +1133,135 @@ design_homology_arms <- function(
   NULL
 }
 
+calculate_screening_product_sizes <- function(
+  screening,
+  original_genome,
+  edited_genome
+) {
+  reference_size <- if (
+    "PRIMER_PAIR_PRODUCT_SIZE" %in% names(screening)
+  ) {
+    suppressWarnings(as.integer(screening$PRIMER_PAIR_PRODUCT_SIZE[[1]]))
+  } else {
+    as.integer(
+      screening$genome_end[[1]] - screening$genome_start[[1]] + 1L
+    )
+  }
+  edited_genome_size <- if (inherits(edited_genome, "XStringSet")) {
+    width(edited_genome)[[1]]
+  } else {
+    length(edited_genome)
+  }
+  edited_size <- reference_size + edited_genome_size - length(original_genome)
+  if (
+    length(reference_size) != 1L ||
+      is.na(reference_size) ||
+      reference_size < 1L ||
+      length(edited_size) != 1L ||
+      is.na(edited_size) ||
+      edited_size < 1L
+  ) {
+    stop("Не удалось рассчитать размеры скрининговых ПЦР-продуктов", call. = FALSE)
+  }
+  c(
+    unsuccessful_insertion_bp = reference_size,
+    successful_insertion_bp = as.integer(edited_size)
+  )
+}
+
+write_wet_lab_outputs <- function(
+  wet_lab_dir,
+  feature,
+  design_class,
+  sequences,
+  sequence_purposes,
+  primer_metrics,
+  screening_product_sizes
+) {
+  required_metrics <- c("name", "purpose", "annealing_sequence", "tm_c")
+  if (
+    !length(sequences) ||
+      length(sequence_purposes) != length(sequences) ||
+      is.null(names(sequences)) ||
+      anyNA(names(sequences)) ||
+      any(!nzchar(names(sequences))) ||
+      !all(required_metrics %in% names(primer_metrics)) ||
+      !all(
+        c("unsuccessful_insertion_bp", "successful_insertion_bp") %in%
+          names(screening_product_sizes)
+      )
+  ) {
+    stop("Неполный набор результатов для WetLab", call. = FALSE)
+  }
+  dir.create(wet_lab_dir, recursive = TRUE, showWarnings = FALSE)
+  writeXStringSet(
+    sequences,
+    file.path(wet_lab_dir, "final_sequences.fasta")
+  )
+  sequence_table <- data.frame(
+    name = names(sequences),
+    sequence = as.character(sequences),
+    purpose = unname(sequence_purposes),
+    stringsAsFactors = FALSE
+  )
+  write_tsv(
+    sequence_table,
+    file.path(wet_lab_dir, "final_sequences.txt")
+  )
+
+  sequence_lines <- apply(
+    sequence_table,
+    1L,
+    function(row) paste(row, collapse = "\t")
+  )
+  tm_table <- primer_metrics
+  tm_table$tm_c <- format(
+    round(tm_table$tm_c, 1),
+    nsmall = 1,
+    trim = TRUE
+  )
+  tm_lines <- apply(
+    tm_table,
+    1L,
+    function(row) paste(row, collapse = "\t")
+  )
+  report <- c(
+    "2PAC: отчёт для мокрой лаборатории",
+    paste("Цель", feature$query_name, sep = "\t"),
+    paste("Класс", design_class, sep = "\t"),
+    "",
+    "Итоговый набор последовательностей",
+    paste(names(sequence_table), collapse = "\t"),
+    sequence_lines,
+    "",
+    paste(
+      "Температуры отжига праймеров",
+      "Tm рассчитана для участка отжига без сервисных последовательностей",
+      sep = "\n"
+    ),
+    paste(names(tm_table), collapse = "\t"),
+    tm_lines,
+    "",
+    "Размеры скрининговых ПЦР-продуктов",
+    paste(
+      "Неуспешная вставка (исходный аллель), п.н.",
+      screening_product_sizes[["unsuccessful_insertion_bp"]],
+      sep = "\t"
+    ),
+    paste(
+      "Успешная вставка (редактированный аллель), п.н.",
+      screening_product_sizes[["successful_insertion_bp"]],
+      sep = "\t"
+    )
+  )
+  writeLines(
+    enc2utf8(report),
+    file.path(wet_lab_dir, "wet_lab_report.txt"),
+    useBytes = TRUE
+  )
+  invisible(wet_lab_dir)
+}
+
 write_design_outputs <- function(
   input,
   feature,
@@ -1194,6 +1386,46 @@ write_design_outputs <- function(
     )
   ))
   writeXStringSet(edited_genome, file.path(target_dir, "edited_genome.fasta"))
+  screening_product_sizes <- calculate_screening_product_sizes(
+    screening,
+    input$genome,
+    edited_genome
+  )
+  final_sequences <- c(all_primers, screening_primers)
+  primer_purposes <- c(
+    "left_arm_forward_primer",
+    "left_arm_reverse_primer",
+    "right_arm_forward_primer",
+    "right_arm_reverse_primer",
+    "screening_forward_primer",
+    "screening_reverse_primer"
+  )
+  sequence_purposes <- c(
+    rep("sgRNA_forward_oligo", length(sgrnas)),
+    "sgRNA_reverse_oligo",
+    primer_purposes
+  )
+  primer_metrics <- data.frame(
+    name = c(names(arm_primers), names(screening_primers)),
+    purpose = primer_purposes,
+    annealing_sequence = c(
+      pair$PRIMER_LEFT_SEQUENCE[[1]],
+      pair$PRIMER_RIGHT_SEQUENCE[[1]],
+      pair$PRIMER_LEFT_SEQUENCE[[2]],
+      pair$PRIMER_RIGHT_SEQUENCE[[2]],
+      screening$PRIMER_LEFT_SEQUENCE[[1]],
+      screening$PRIMER_RIGHT_SEQUENCE[[1]]
+    ),
+    tm_c = c(
+      pair$PRIMER_LEFT_TM[[1]],
+      pair$PRIMER_RIGHT_TM[[1]],
+      pair$PRIMER_LEFT_TM[[2]],
+      pair$PRIMER_RIGHT_TM[[2]],
+      screening$PRIMER_LEFT_TM[[1]],
+      screening$PRIMER_RIGHT_TM[[1]]
+    ),
+    stringsAsFactors = FALSE
+  )
 
   writeLines(
     c(
@@ -1219,8 +1451,26 @@ write_design_outputs <- function(
       paste("frame_status", frame_status, sep = "\t"),
       paste("left_arm_nt", length(final_arms[[1]]), sep = "\t"),
       paste("right_arm_nt", length(final_arms[[2]]), sep = "\t"),
-      paste("left_primer_tm", round(pair$PRIMER_LEFT_TM[[1]], 1), sep = "\t"),
-      paste("right_primer_tm", round(pair$PRIMER_RIGHT_TM[[2]], 1), sep = "\t"),
+      paste(
+        "left_forward_primer_tm",
+        round(pair$PRIMER_LEFT_TM[[1]], 1),
+        sep = "\t"
+      ),
+      paste(
+        "left_reverse_primer_tm",
+        round(pair$PRIMER_RIGHT_TM[[1]], 1),
+        sep = "\t"
+      ),
+      paste(
+        "right_forward_primer_tm",
+        round(pair$PRIMER_LEFT_TM[[2]], 1),
+        sep = "\t"
+      ),
+      paste(
+        "right_reverse_primer_tm",
+        round(pair$PRIMER_RIGHT_TM[[2]], 1),
+        sep = "\t"
+      ),
       paste(
         "screening_forward_tm",
         round(screening$PRIMER_LEFT_TM[[1]], 1),
@@ -1230,6 +1480,16 @@ write_design_outputs <- function(
         "screening_reverse_tm",
         round(screening$PRIMER_RIGHT_TM[[1]], 1),
         sep = "\t"
+      ),
+      paste(
+        "screening_unsuccessful_insertion_bp",
+        screening_product_sizes[["unsuccessful_insertion_bp"]],
+        sep = "\t"
+      ),
+      paste(
+        "screening_successful_insertion_bp",
+        screening_product_sizes[["successful_insertion_bp"]],
+        sep = "\t"
       )
     ),
     file.path(target_dir, "report.tsv")
@@ -1237,7 +1497,13 @@ write_design_outputs <- function(
   list(
     all_primers_path = file.path(target_dir, "all_primers.fasta"),
     plain_path = plain_path,
-    screening_path = screening_path
+    screening_path = screening_path,
+    wet_lab = list(
+      sequences = final_sequences,
+      sequence_purposes = sequence_purposes,
+      primer_metrics = primer_metrics,
+      screening_product_sizes = screening_product_sizes
+    )
   )
 }
 
@@ -1347,7 +1613,10 @@ design_from_grna_pool <- function(
     input$parameters$n20_mn,
     input$parameters$n20_strands,
     function(candidates) {
-      selected <- selected_grnas(candidates)
+      selected <- list(
+        table = candidates,
+        n20_range = range(c(candidates$n20_start, candidates$n20_end))
+      )
       range_key <- paste(selected$n20_range, collapse = ":")
       if (exists(range_key, envir = attempted_ranges, inherits = FALSE)) {
         return(NULL)
@@ -1467,7 +1736,23 @@ write_target_error <- function(
 
 design_target <- function(input, genome_name, gene_name, design_class) {
   safe_name <- tolower(gsub("[^A-Za-z0-9_.-]", "_", gene_name))
-  target_dir <- file.path(input$output_dir, paste0(safe_name, "_results"))
+  layout <- output_layout(input$output_dir)
+  target_dir <- file.path(
+    layout$tech_report,
+    paste0(safe_name, "_results")
+  )
+  wet_lab_dir <- file.path(
+    layout$wet_lab,
+    paste0(safe_name, "_results")
+  )
+  unlink(file.path(
+    wet_lab_dir,
+    c(
+      "final_sequences.fasta",
+      "final_sequences.txt",
+      "wet_lab_report.txt"
+    )
+  ))
   dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
   log_path <- file.path(target_dir, "design.log")
   error_path <- file.path(target_dir, "error.txt")
@@ -1544,6 +1829,19 @@ design_target <- function(input, genome_name, gene_name, design_class) {
         log_path,
         run_virtual_pcr(input, target_dir, design$primer_paths)
       )
+      run_design_stage(
+        "wet_lab_output",
+        log_path,
+        write_wet_lab_outputs(
+          wet_lab_dir,
+          feature,
+          design_class,
+          design$primer_paths$wet_lab$sequences,
+          design$primer_paths$wet_lab$sequence_purposes,
+          design$primer_paths$wet_lab$primer_metrics,
+          design$primer_paths$wet_lab$screening_product_sizes
+        )
+      )
       append_design_log(log_path, "target", "OK")
       data.frame(
         gene = gene_name,
@@ -1551,7 +1849,8 @@ design_target <- function(input, genome_name, gene_name, design_class) {
         output_dir = target_dir,
         status = "ok",
         stage = NA_character_,
-        reason = NA_character_
+        reason = NA_character_,
+        wet_lab_dir = wet_lab_dir
       )
     },
     error = function(e) {
@@ -1588,14 +1887,27 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   cli <- parse_designer_args(args)
   input <- make_design_input(cli)
   dir.create(input$output_dir, recursive = TRUE, showWarnings = FALSE)
-  genome_assets <- prepare_chopchop_assets(input)
-  configure_chopchop(input, genome_assets)
-  cds <- split_gene_list(cli$cds)
-  ncrna <- split_gene_list(cli$ncrna)
+  layout <- output_layout(input$output_dir)
+  dir.create(layout$wet_lab, recursive = TRUE, showWarnings = FALSE)
+  dir.create(layout$tech_report, recursive = TRUE, showWarnings = FALSE)
   targets <- bind_rows(
-    data.frame(gene = cds, class = rep("cds", length(cds))),
-    data.frame(gene = ncrna, class = rep("ncrna", length(ncrna)))
+    data.frame(gene = cli$cds, class = rep("cds", length(cli$cds))),
+    data.frame(gene = cli$ncrna, class = rep("ncrna", length(cli$ncrna)))
   )
+  write_run_parameters(
+    input,
+    targets,
+    file.path(layout$tech_report, "run_parameters.tsv")
+  )
+  genome_assets <- prepare_chopchop_assets(input)
+  chopchop_config <- configure_chopchop(input, genome_assets)
+  if (!file.copy(
+    chopchop_config,
+    file.path(layout$tech_report, "chopchop_config.json"),
+    overwrite = TRUE
+  )) {
+    stop("Не удалось сохранить конфигурацию CHOPCHOP в TechReport", call. = FALSE)
+  }
   results <- lapply(seq_len(nrow(targets)), function(i) {
     tryCatch(
       design_target(
@@ -1628,14 +1940,15 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
           output_dir = output_dir,
           status = "error",
           stage = stage,
-          reason = conditionMessage(e)
+          reason = conditionMessage(e),
+          wet_lab_dir = NA_character_
         )
       }
     )
   })
   write_tsv(
     bind_rows(results),
-    file.path(input$output_dir, "design_summary.tsv")
+    file.path(layout$tech_report, "design_summary.tsv")
   )
 }
 
