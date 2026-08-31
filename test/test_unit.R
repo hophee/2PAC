@@ -45,12 +45,12 @@ assert_true(
   "CHOPCHOP path default is incorrect"
 )
 assert_true(
-  defaults$primer3 == "primer3/src/primer3_core",
-  "Primer3 path default is incorrect"
+  defaults$chopchop_python == "chopchop-python",
+  "CHOPCHOP Python default is incorrect"
 )
 assert_true(
-  defaults$virtual_pcr_jar == "virtualPCR/dist/virtualPCR.jar",
-  "virtualPCR path default is incorrect"
+  defaults$primer3 == "primer3/src/primer3_core",
+  "Primer3 path default is incorrect"
 )
 assert_true(defaults$n20_mn == 1L, "n20_mn default is not 1")
 assert_true(defaults$n20_strands == "random", "strand default is not random")
@@ -63,6 +63,20 @@ assert_true(
 assert_true(
   identical(unname(defaults$right_arm), c(400L, 450L, 500L)),
   "right arm defaults are incorrect"
+)
+
+minus_positions <- add_genome_positions(
+  data.frame(PRIMER_LEFT_pos = 1L, PRIMER_RIGHT_pos = 20L),
+  data.frame(PRIMER_LEFT_pos = 1L, PRIMER_RIGHT_pos = 20L),
+  list(left_end = 100L, right_end = 50L),
+  FALSE
+)
+assert_true(
+  identical(
+    unname(as.integer(minus_positions$left[1, c("genome_start", "genome_end")])),
+    c(81L, 100L)
+  ),
+  "minus-strand left-arm coordinates are not one-based"
 )
 assert_true(
   defaults$n20_arm_min_distance == 40L,
@@ -188,6 +202,272 @@ minus_pair <- choose_pair(
 )
 assert_true(!is.null(minus_pair), "Minus-strand N20 distance was rejected")
 
+write_reference_fasta <- function(sequence, name) {
+  path <- tempfile("2pac-reference-", fileext = ".fasta")
+  writeXStringSet(DNAStringSet(setNames(sequence, name)), path)
+  path
+}
+
+make_test_references <- function(genome, target_plasmid, cas_plasmid = NULL) {
+  make_specificity_references(
+    write_reference_fasta(genome, "chromosome"),
+    write_reference_fasta(target_plasmid, "pTarget"),
+    if (is.null(cas_plasmid)) NULL else {
+      write_reference_fasta(cas_plasmid, "pCas")
+    }
+  )
+}
+
+replace_base <- function(sequence, position) {
+  bases <- strsplit(sequence, "", fixed = TRUE)[[1]]
+  bases[[position]] <- if (bases[[position]] == "A") "C" else "A"
+  paste(bases, collapse = "")
+}
+
+specificity_config <- primer_qc_defaults()
+specificity_config$min_product_size <- 1L
+specificity_config$max_product_size <- 500L
+specificity_config$max_mismatches <- 1L
+forward_probe <- "ACGTTGCAACGTTCGATCGA"
+reverse_probe <- "TGCACCGATGTTACGTCAGT"
+reverse_site <- as.character(reverseComplement(DNAString(reverse_probe)))
+expected_sequence <- paste0(forward_probe, strrep("A", 20L), reverse_site)
+references <- make_test_references(
+  expected_sequence,
+  strrep("G", 120L),
+  strrep("C", 120L)
+)
+expected_product <- list(
+  reference_id = "genome::chromosome",
+  start = 1L,
+  end = nchar(expected_sequence),
+  size = nchar(expected_sequence),
+  allowed_products = 1L
+)
+specificity <- evaluate_pair_specificity(
+  forward_probe,
+  reverse_probe,
+  references,
+  expected_product,
+  specificity_config
+)
+assert_true(specificity$passed, "The exact expected amplicon was rejected")
+assert_true(
+  specificity$n_expected_products == 1L,
+  "The exact expected amplicon was not identified uniquely"
+)
+
+multi_sequence <- paste0(
+  forward_probe,
+  strrep("A", 20L),
+  reverse_site,
+  strrep("C", 20L),
+  reverse_site
+)
+multi_references <- make_test_references(
+  multi_sequence,
+  strrep("G", 160L),
+  strrep("C", 160L)
+)
+multi_specificity <- evaluate_pair_specificity(
+  forward_probe,
+  reverse_probe,
+  multi_references,
+  list(
+    reference_id = "genome::chromosome",
+    start = 1L,
+    end = nchar(expected_sequence),
+    size = nchar(expected_sequence),
+    allowed_products = 1L
+  ),
+  specificity_config
+)
+assert_true(
+  nrow(multi_specificity$amplicons) == 2L,
+  "Exhaustive pairing did not find both amplicons"
+)
+assert_true(
+  multi_specificity$n_all_offtarget_products == 1L,
+  "An off-target product on the intended genome was not rejected"
+)
+assert_true(
+  multi_specificity$n_reduced_matches_missed == 1L,
+  "The reduced matchProbePair result was treated as exhaustive"
+)
+
+plasmid_references <- make_test_references(
+  expected_sequence,
+  expected_sequence,
+  expected_sequence
+)
+plasmid_specificity <- evaluate_pair_specificity(
+  forward_probe,
+  reverse_probe,
+  plasmid_references,
+  expected_product,
+  specificity_config
+)
+offtarget_types <- unique(
+  plasmid_specificity$amplicons$reference_type[
+    plasmid_specificity$amplicons$off_target &
+      !plasmid_specificity$amplicons$invalid_size
+  ]
+)
+assert_true(
+  all(c("target_plasmid", "cas_plasmid") %in% offtarget_types),
+  "pTarget or pCas off-target amplicon was missed"
+)
+
+internal_mismatch_sequence <- replace_base(expected_sequence, 3L)
+mismatch_specificity <- evaluate_pair_specificity(
+  forward_probe,
+  reverse_probe,
+  make_test_references(
+    internal_mismatch_sequence,
+    strrep("G", 120L),
+    strrep("C", 120L)
+  ),
+  expected_product,
+  specificity_config
+)
+forward_site_with_mismatch <- mismatch_specificity$binding_sites[
+  mismatch_specificity$binding_sites$primer_id == "forward" &
+    mismatch_specificity$binding_sites$reference_type == "genome",
+  ,
+  drop = FALSE
+]
+assert_true(
+  nrow(forward_site_with_mismatch) == 1L &&
+    forward_site_with_mismatch$mismatches[[1]] == 1L &&
+    forward_site_with_mismatch$mismatches_3p[[1]] == 0L,
+  "An internal primer mismatch was not reported correctly"
+)
+
+critical_mismatch_sequence <- replace_base(
+  expected_sequence,
+  nchar(forward_probe)
+)
+critical_specificity <- evaluate_pair_specificity(
+  forward_probe,
+  reverse_probe,
+  make_test_references(
+    critical_mismatch_sequence,
+    strrep("G", 120L),
+    strrep("C", 120L)
+  ),
+  expected_product,
+  specificity_config
+)
+assert_true(
+  !critical_specificity$passed &&
+    any(critical_specificity$binding_sites$mismatches_3p == 1L),
+  "A critical 3-prime mismatch was allowed to form the intended product"
+)
+
+circular_bases <- rep("C", 120L)
+circular_bases[101:120] <- strsplit(forward_probe, "", fixed = TRUE)[[1]]
+circular_bases[21:40] <- strsplit(reverse_site, "", fixed = TRUE)[[1]]
+circular_sequence <- paste(circular_bases, collapse = "")
+circular_specificity <- evaluate_pair_specificity(
+  forward_probe,
+  reverse_probe,
+  make_test_references(
+    strrep("G", 160L),
+    circular_sequence,
+    strrep("A", 160L)
+  ),
+  list(
+    reference_id = "target_plasmid::pTarget",
+    start = 101L,
+    end = 40L,
+    size = 60L,
+    allowed_products = 1L
+  ),
+  specificity_config
+)
+assert_true(
+  circular_specificity$passed &&
+    nrow(circular_specificity$amplicons) == 1L &&
+    circular_specificity$amplicons$circular_wrap[[1]],
+  "A circular wrap-around amplicon was not identified uniquely"
+)
+
+ranking_candidates <- data.frame(
+  pair_id = c("first", "second", "third"),
+  structure_passed = c(TRUE, TRUE, TRUE),
+  specificity_passed = c(FALSE, TRUE, TRUE),
+  openprimer_passed = c(TRUE, TRUE, TRUE),
+  n_high_risk_offtarget_products = c(0, 0, 0),
+  n_all_offtarget_products = c(0, 0, 0),
+  n_perfect_3p_offtarget_sites = c(0, 0, 0),
+  openprimer_failed_soft_constraints = c(0, 0, 0),
+  openprimer_penalty = c(0, 1, 1),
+  max_dimer_risk = c(0, 1, 1),
+  abs_tm_diff = c(0, 1, 1),
+  primer3_pair_penalty = c(0, 1, 1),
+  deleted_nt = c(0, 10, 10),
+  primer3_index = c(1, 2, 3),
+  stringsAsFactors = FALSE
+)
+ranking <- select_best_primer_pair(ranking_candidates)
+assert_true(
+  ranking$pair$pair_id[[1]] == "second",
+  "The first rejected Primer3 pair prevented selection of the second"
+)
+assert_true(
+  !ranking$ranking$selected[[1]],
+  "A hard specificity failure was compensated by soft scores"
+)
+assert_true(
+  select_best_primer_pair(ranking_candidates[2:3, ])$pair$pair_id[[1]] ==
+    "second",
+  "Primer ranking is not deterministic"
+)
+
+assert_error(
+  assert_openprimer_constraints(
+    c("primer_length", "gc_ratio"),
+    c("primer_length", "secondary_structure")
+  ),
+  "secondary_structure"
+)
+sequence_forms <- openprimer_sequence_forms(
+  "LF_LR",
+  forward_probe,
+  reverse_probe,
+  paste0("SERVICE", forward_probe),
+  paste0("TAIL", reverse_probe)
+)
+assert_true(
+  sequence_forms$annealing_sequence[[1]] == forward_probe &&
+    sequence_forms$full_oligo_sequence[[1]] != forward_probe,
+  "Annealing and full oligo sequences were not kept separate"
+)
+assert_true(
+  identical(unique(sequence_forms$reaction), "LF_LR") &&
+    nrow(sequence_forms) == 2L,
+  "Cross-dimerization input contains primers from another reaction"
+)
+physical_reactions <- bind_rows(lapply(
+  c("LF_LR", "RF_RR", "scrF_scrR"),
+  function(reaction) openprimer_sequence_forms(
+    reaction,
+    paste0(forward_probe, substr(reaction, 1L, 1L)),
+    paste0(reverse_probe, substr(reaction, 2L, 2L)),
+    paste0("FULLF", reaction),
+    paste0("FULLR", reaction)
+  )
+))
+assert_true(
+  all(table(physical_reactions$reaction) == 2L) &&
+    all(vapply(
+      split(physical_reactions, physical_reactions$reaction),
+      function(group) identical(group$primer_id, c("forward", "reverse")),
+      logical(1)
+    )),
+  "Cross-dimerization groups mix primers from different PCR reactions"
+)
+
 layout <- output_layout("results")
 assert_true(
   identical(layout$wet_lab, file.path("results", "WetLab")),
@@ -224,6 +504,16 @@ assert_true(
 assert_true(
   any(settings_text == "PRIMER_DNA_CONC=50"),
   "DNA concentration is absent from Primer3 settings"
+)
+assert_true(
+  all(c(
+    "PRIMER_MIN_SIZE=18",
+    "PRIMER_OPT_SIZE=21",
+    "PRIMER_MAX_SIZE=27",
+    "PRIMER_MAX_POLY_X=5",
+    "PRIMER_PAIR_MAX_DIFF_TM=8.0"
+  ) %in% settings_text),
+  "Legacy Primer3 generation limits changed"
 )
 
 screening_sizes <- calculate_screening_product_sizes(
@@ -287,7 +577,7 @@ assert_true(
   "WetLab TXT does not contain the complete final sequence set"
 )
 assert_true(
-  identical(wet_lab_table$sequence, as.character(wet_lab_sequences)),
+  identical(wet_lab_table$sequence, unname(as.character(wet_lab_sequences))),
   "WetLab FASTA and TXT contain different sequences"
 )
 wet_lab_report <- readLines(
@@ -357,6 +647,25 @@ assert_true(any(grepl("gene\\tmissing_gene", error_text)), "Gene is absent")
 assert_true(
   !any(file.exists(stale_wet_lab_files)),
   "A failed target left stale WetLab output"
+)
+
+trace_dir <- tempfile("2pac-primer-trace-")
+dir.create(trace_dir)
+trace <- new_primer_qc_trace()
+trace$openprimer[[1]] <- data.frame(
+  reaction = "LF_LR",
+  pair_id = "pair_1",
+  Structure = "line one\nline two",
+  EVAL_secondary_structure = TRUE,
+  constraints_passed = TRUE,
+  penalty = 0,
+  stringsAsFactors = FALSE
+)
+write_primer_qc_trace(trace, trace_dir)
+trace_lines <- readLines(file.path(trace_dir, "primer_openprimer_qc.tsv"))
+assert_true(
+  length(trace_lines) == 2L && grepl("line one line two", trace_lines[[2]]),
+  "Multiline openPrimeR metrics break the TSV row contract"
 )
 
 message("Unit tests passed")

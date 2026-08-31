@@ -8,6 +8,10 @@ suppressPackageStartupMessages(library(argparser))
 
 source("callPrimer3.R")
 
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
+}
+
 extract_gff_attribute <- function(attributes, attribute_name) {
   pattern <- paste0("(?:^|;)\\s*", attribute_name, "=([^;]+)")
   matches <- regexec(pattern, attributes, perl = TRUE)
@@ -151,15 +155,15 @@ parse_designer_args <- function(args) {
   )
   parser <- add_argument(
     parser,
-    "--primer3",
-    help = "Path to primer3_core",
-    default = "primer3/src/primer3_core"
+    "--chopchop-python",
+    help = "Python 2 executable for CHOPCHOP",
+    default = "chopchop-python"
   )
   parser <- add_argument(
     parser,
-    "--virtual-pcr-jar",
-    help = "Path to virtualPCR.jar",
-    default = "virtualPCR/dist/virtualPCR.jar"
+    "--primer3",
+    help = "Path to primer3_core",
+    default = "primer3/src/primer3_core"
   )
   parser <- add_argument(
     parser,
@@ -239,6 +243,48 @@ parse_designer_args <- function(args) {
     "--n20-arm-min-distance",
     help = "Minimum distance from every N20 to both homology arms",
     default = 40L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--primer-max-mismatches",
+    help = "Maximum mismatches per primer binding site",
+    default = 2L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--primer-critical-3p-bases",
+    help = "Length of the critical primer 3-prime region",
+    default = 5L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--primer-max-3p-mismatches",
+    help = "Maximum mismatches in the critical 3-prime region",
+    default = 0L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--primer-min-product-size",
+    help = "Minimum counted PCR product size",
+    default = 50L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--primer-max-product-size",
+    help = "Maximum counted PCR product size",
+    default = 2000L,
+    type = "integer"
+  )
+  parser <- add_argument(
+    parser,
+    "--primer-max-offtarget-products",
+    help = "Maximum allowed non-intended PCR products",
+    default = 0L,
     type = "integer"
   )
 
@@ -354,6 +400,25 @@ parse_designer_args <- function(args) {
       call. = FALSE
     )
   }
+  qc_values <- c(
+    max_mismatches = parsed$primer_max_mismatches,
+    critical_3p_bases = parsed$primer_critical_3p_bases,
+    max_3p_mismatches = parsed$primer_max_3p_mismatches,
+    min_product_size = parsed$primer_min_product_size,
+    max_product_size = parsed$primer_max_product_size,
+    max_allowed_offtarget_products = parsed$primer_max_offtarget_products
+  )
+  qc_values <- setNames(as.integer(qc_values), names(qc_values))
+  if (
+    anyNA(qc_values) ||
+      any(qc_values < 0L) ||
+      qc_values[["critical_3p_bases"]] < 1L ||
+      qc_values[["min_product_size"]] < 1L ||
+      qc_values[["min_product_size"]] > qc_values[["max_product_size"]] ||
+      qc_values[["max_3p_mismatches"]] > qc_values[["critical_3p_bases"]]
+  ) {
+    stop("Некорректные параметры primer specificity QC", call. = FALSE)
+  }
 
   values <- list(
     genome = normalize_scalar(parsed$genome),
@@ -365,8 +430,8 @@ parse_designer_args <- function(args) {
     cas_plasmid = normalize_scalar(parsed$cas_plasmid),
     annotation_format = annotation_format,
     chopchop_script = normalize_scalar(parsed$chopchop_script),
+    chopchop_python = normalize_scalar(parsed$chopchop_python),
     primer3 = normalize_scalar(parsed$primer3),
-    virtual_pcr_jar = normalize_scalar(parsed$virtual_pcr_jar),
     n20_mn = n20_mn,
     n20_strands = n20_strands,
     n20_offtarget = parse_offtarget_thresholds(parsed$n20_offtarget),
@@ -374,7 +439,8 @@ parse_designer_args <- function(args) {
     ncrna_fs = isTRUE(parsed$ncrna_fs),
     left_arm = setNames(left_arm, c("min", "opt", "max")),
     right_arm = setNames(right_arm, c("min", "opt", "max")),
-    n20_arm_min_distance = n20_arm_min_distance
+    n20_arm_min_distance = n20_arm_min_distance,
+    primer_qc = utils::modifyList(primer_qc_defaults(), as.list(qc_values))
   )
 
   required <- c("genome", "genome_annotation", "target_plasmid", "output_dir")
@@ -419,6 +485,1008 @@ primer3_buffer_parameters <- function() {
   )
 }
 
+primer_qc_defaults <- function() {
+  list(
+    max_mismatches = 2L,
+    critical_3p_bases = 5L,
+    max_3p_mismatches = 0L,
+    min_product_size = 50L,
+    max_product_size = 2000L,
+    max_allowed_offtarget_products = 0L,
+    expected_coordinate_tolerance = 0L,
+    expected_size_tolerance = 0L,
+    primer_efficiency_min = 0.001,
+    openprimer_profile = "C_Taq_PCR_high_stringency.xml",
+    openprimer_critical_annealing = c(
+      "primer_length",
+      "gc_ratio",
+      "gc_clamp",
+      "no_runs",
+      "no_repeats",
+      "melting_temp_range",
+      "melting_temp_diff"
+    ),
+    openprimer_critical_full = c(
+      "self_dimerization",
+      "cross_dimerization",
+      "secondary_structure"
+    ),
+    openprimer_soft_constraints = character()
+  )
+}
+
+make_specificity_references <- function(
+  genome,
+  target_plasmid,
+  cas_plasmid = NULL
+) {
+  inputs <- list(
+    genome = list(path = genome, topology = "linear"),
+    target_plasmid = list(path = target_plasmid, topology = "circular"),
+    cas_plasmid = list(path = cas_plasmid, topology = "circular")
+  )
+  records <- list()
+  for (reference_type in names(inputs)) {
+    input <- inputs[[reference_type]]
+    if (is.null(input$path) || !length(input$path) || is.na(input$path) ||
+      !nzchar(input$path)) {
+      next
+    }
+    sequences <- readDNAStringSet(input$path)
+    if (!length(sequences)) {
+      stop(
+        sprintf("FASTA не содержит записей: %s", input$path),
+        call. = FALSE
+      )
+    }
+    source_names <- names(sequences)
+    missing_names <- is.na(source_names) | !nzchar(source_names)
+    source_names[missing_names] <- paste0("record_", which(missing_names))
+    for (i in seq_along(sequences)) {
+      records[[length(records) + 1L]] <- data.frame(
+        reference_id = paste(reference_type, source_names[[i]], sep = "::"),
+        reference_type = reference_type,
+        topology = input$topology,
+        source_name = source_names[[i]],
+        source_length = length(sequences[[i]]),
+        source_path = input$path,
+        stringsAsFactors = FALSE
+      )
+      records[[length(records)]]$sequence <- I(list(sequences[[i]]))
+    }
+  }
+  references <- bind_rows(records)
+  if (!nrow(references) || anyDuplicated(references$reference_id)) {
+    stop("Не удалось создать уникальный набор specificity references", call. = FALSE)
+  }
+  references
+}
+
+reference_digest <- function(references) {
+  digest::digest(list(
+    references$reference_id,
+    references$reference_type,
+    references$topology,
+    vapply(references$sequence, as.character, character(1))
+  ))
+}
+
+extend_reference_for_pcr <- function(reference, max_product_size, primer_length) {
+  sequence <- reference$sequence[[1]]
+  original_length <- reference$source_length[[1]]
+  if (reference$topology[[1]] != "circular") {
+    return(sequence)
+  }
+  extension_length <- min(
+    original_length,
+    max_product_size + primer_length - 1L
+  )
+  DNAString(paste0(
+    as.character(sequence),
+    substr(as.character(sequence), 1L, extension_length)
+  ))
+}
+
+iupac_mismatch_positions <- function(pattern, observed) {
+  pattern <- strsplit(toupper(pattern), "", fixed = TRUE)[[1]]
+  observed <- strsplit(toupper(observed), "", fixed = TRUE)[[1]]
+  codes <- IUPAC_CODE_MAP
+  compatible <- mapply(
+    function(x, y) {
+      x_bases <- strsplit(unname(codes[[x]]), "", fixed = TRUE)[[1]]
+      y_bases <- strsplit(unname(codes[[y]]), "", fixed = TRUE)[[1]]
+      length(intersect(x_bases, y_bases)) > 0L
+    },
+    pattern,
+    observed,
+    USE.NAMES = FALSE
+  )
+  which(!compatible)
+}
+
+enumerate_primer_binding_sites <- function(
+  primer_sequence,
+  primer_id,
+  references,
+  config = primer_qc_defaults()
+) {
+  primer_sequence <- toupper(as.character(primer_sequence))
+  primer_length <- nchar(primer_sequence)
+  if (primer_length < 1L) {
+    stop("Пустая последовательность праймера", call. = FALSE)
+  }
+  strand_patterns <- list(
+    `+` = primer_sequence,
+    `-` = as.character(reverseComplement(DNAString(primer_sequence)))
+  )
+  sites <- list()
+  for (i in seq_len(nrow(references))) {
+    reference <- references[i, , drop = FALSE]
+    subject <- extend_reference_for_pcr(
+      reference,
+      config$max_product_size,
+      primer_length
+    )
+    original_length <- reference$source_length[[1]]
+    for (strand in names(strand_patterns)) {
+      pattern <- strand_patterns[[strand]]
+      hits <- matchPattern(
+        DNAString(pattern),
+        subject,
+        algorithm = "auto",
+        max.mismatch = config$max_mismatches,
+        with.indels = FALSE,
+        fixed = FALSE
+      )
+      if (!length(hits)) {
+        next
+      }
+      for (j in seq_along(hits)) {
+        raw_start <- start(hits)[[j]]
+        raw_end <- end(hits)[[j]]
+        if (reference$topology[[1]] == "circular" &&
+          raw_start > original_length + config$max_product_size) {
+          next
+        }
+        observed <- as.character(subseq(subject, raw_start, raw_end))
+        pattern_mismatches <- iupac_mismatch_positions(pattern, observed)
+        primer_mismatches <- if (strand == "+") {
+          pattern_mismatches
+        } else {
+          primer_length - pattern_mismatches + 1L
+        }
+        primer_mismatches <- sort(primer_mismatches)
+        critical_start <- max(1L, primer_length - config$critical_3p_bases + 1L)
+        normalized_start <- if (reference$topology[[1]] == "circular") {
+          (raw_start - 1L) %% original_length + 1L
+        } else {
+          raw_start
+        }
+        normalized_end <- if (reference$topology[[1]] == "circular") {
+          (raw_end - 1L) %% original_length + 1L
+        } else {
+          raw_end
+        }
+        sites[[length(sites) + 1L]] <- data.frame(
+          site_id = paste(
+            primer_id,
+            reference$reference_id[[1]],
+            strand,
+            raw_start,
+            raw_end,
+            sep = ":"
+          ),
+          primer_id = primer_id,
+          reference_id = reference$reference_id[[1]],
+          reference_type = reference$reference_type[[1]],
+          start = normalized_start,
+          end = normalized_end,
+          strand = strand,
+          mismatches = length(primer_mismatches),
+          mismatch_positions = paste(primer_mismatches, collapse = ","),
+          mismatches_3p = sum(primer_mismatches >= critical_start),
+          passes_3p = sum(primer_mismatches >= critical_start) <=
+            config$max_3p_mismatches,
+          circular_wrap = raw_end > original_length,
+          duplicated_circular_hit = raw_start > original_length,
+          raw_start = raw_start,
+          raw_end = raw_end,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  if (!length(sites)) {
+    return(data.frame(
+      site_id = character(), primer_id = character(),
+      reference_id = character(), reference_type = character(),
+      start = integer(), end = integer(), strand = character(),
+      mismatches = integer(), mismatch_positions = character(),
+      mismatches_3p = integer(), passes_3p = logical(),
+      circular_wrap = logical(), duplicated_circular_hit = logical(),
+      raw_start = integer(), raw_end = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+  bind_rows(sites)
+}
+
+empty_amplicon_table <- function() {
+  data.frame(
+    reference_id = character(), reference_type = character(),
+    start = integer(), end = integer(), product_size = integer(),
+    sequence = character(), circular_wrap = logical(),
+    invalid_size = logical(), forward_site_id = character(),
+    reverse_site_id = character(), forward_mismatches_3p = integer(),
+    reverse_mismatches_3p = integer(),
+    duplicated_circular_hit = logical(), stringsAsFactors = FALSE
+  )
+}
+
+enumerate_primer_amplicons <- function(sites, references, config) {
+  products <- list()
+  for (reference_id in unique(sites$reference_id)) {
+    reference <- references[
+      references$reference_id == reference_id,
+      ,
+      drop = FALSE
+    ]
+    reference_sites <- sites[
+      sites$reference_id == reference_id & sites$passes_3p,
+      ,
+      drop = FALSE
+    ]
+    forward_sites <- reference_sites[reference_sites$primer_id == "forward", ]
+    reverse_sites <- reference_sites[reference_sites$primer_id == "reverse", ]
+    if (!nrow(forward_sites) || !nrow(reverse_sites)) {
+      next
+    }
+    subject <- extend_reference_for_pcr(
+      reference,
+      config$max_product_size,
+      max(forward_sites$raw_end - forward_sites$raw_start + 1L)
+    )
+    original_length <- reference$source_length[[1]]
+    for (fi in seq_len(nrow(forward_sites))) {
+      for (ri in seq_len(nrow(reverse_sites))) {
+        forward_site <- forward_sites[fi, , drop = FALSE]
+        reverse_site <- reverse_sites[ri, , drop = FALSE]
+        if (forward_site$strand[[1]] == "+" &&
+          reverse_site$strand[[1]] == "-") {
+          raw_start <- forward_site$raw_start[[1]]
+          raw_end <- reverse_site$raw_end[[1]]
+          product_orientation <- "+"
+        } else if (forward_site$strand[[1]] == "-" &&
+          reverse_site$strand[[1]] == "+") {
+          raw_start <- reverse_site$raw_start[[1]]
+          raw_end <- forward_site$raw_end[[1]]
+          product_orientation <- "-"
+        } else {
+          next
+        }
+        if (raw_start > raw_end) {
+          next
+        }
+        product_size <- raw_end - raw_start + 1L
+        if (reference$topology[[1]] == "circular" &&
+          (raw_start > original_length || product_size > original_length)) {
+          next
+        }
+        if (raw_end > length(subject)) {
+          next
+        }
+        products[[length(products) + 1L]] <- data.frame(
+          reference_id = reference_id,
+          reference_type = reference$reference_type[[1]],
+          start = if (reference$topology[[1]] == "circular") {
+            (raw_start - 1L) %% original_length + 1L
+          } else raw_start,
+          end = if (reference$topology[[1]] == "circular") {
+            (raw_end - 1L) %% original_length + 1L
+          } else raw_end,
+          product_size = product_size,
+          sequence = if (product_orientation == "+") {
+            as.character(subseq(subject, raw_start, raw_end))
+          } else {
+            as.character(reverseComplement(subseq(subject, raw_start, raw_end)))
+          },
+          circular_wrap = raw_end > original_length,
+          invalid_size = product_size < config$min_product_size ||
+            product_size > config$max_product_size,
+          forward_site_id = forward_site$site_id[[1]],
+          reverse_site_id = reverse_site$site_id[[1]],
+          forward_mismatches_3p = forward_site$mismatches_3p[[1]],
+          reverse_mismatches_3p = reverse_site$mismatches_3p[[1]],
+          duplicated_circular_hit = FALSE,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  if (!length(products)) {
+    return(empty_amplicon_table())
+  }
+  products <- bind_rows(products)
+  key <- paste(
+    products$reference_id,
+    products$start,
+    products$end,
+    products$product_size,
+    sep = ":"
+  )
+  products$duplicated_circular_hit <- duplicated(key)
+  products[!products$duplicated_circular_hit, , drop = FALSE]
+}
+
+match_probe_pair_all_references <- function(
+  forward_probe,
+  reverse_probe,
+  references,
+  config = primer_qc_defaults()
+) {
+  products <- list()
+  max_primer_length <- max(nchar(c(forward_probe, reverse_probe)))
+  for (i in seq_len(nrow(references))) {
+    reference <- references[i, , drop = FALSE]
+    subject <- extend_reference_for_pcr(
+      reference,
+      config$max_product_size,
+      max_primer_length
+    )
+    views <- matchProbePair(
+      Fprobe = DNAString(forward_probe),
+      Rprobe = DNAString(reverse_probe),
+      subject = subject,
+      algorithm = "auto",
+      max.mismatch = config$max_mismatches,
+      with.indels = FALSE,
+      fixed = FALSE
+    )
+    if (!length(views)) {
+      next
+    }
+    original_length <- reference$source_length[[1]]
+    for (j in seq_along(views)) {
+      raw_start <- start(views)[[j]]
+      raw_end <- end(views)[[j]]
+      product_size <- width(views)[[j]]
+      if (reference$topology[[1]] == "circular" &&
+        (raw_start > original_length || product_size > original_length)) {
+        next
+      }
+      products[[length(products) + 1L]] <- data.frame(
+        reference_id = reference$reference_id[[1]],
+        reference_type = reference$reference_type[[1]],
+        start = if (reference$topology[[1]] == "circular") {
+          (raw_start - 1L) %% original_length + 1L
+        } else raw_start,
+        end = if (reference$topology[[1]] == "circular") {
+          (raw_end - 1L) %% original_length + 1L
+        } else raw_end,
+        product_size = product_size,
+        sequence = as.character(views[[j]]),
+        circular_wrap = raw_end > original_length,
+        invalid_size = product_size < config$min_product_size ||
+          product_size > config$max_product_size,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  if (!length(products)) {
+    return(empty_amplicon_table()[, c(
+      "reference_id", "reference_type", "start", "end", "product_size",
+      "sequence", "circular_wrap", "invalid_size"
+    )])
+  }
+  products <- bind_rows(products)
+  key <- paste(
+    products$reference_id,
+    products$start,
+    products$end,
+    products$product_size,
+    sep = ":"
+  )
+  products[!duplicated(key), , drop = FALSE]
+}
+
+expected_product_match <- function(amplicons, expected_product, config) {
+  if (!nrow(amplicons)) {
+    return(logical())
+  }
+  coordinate_tolerance <- expected_product$coordinate_tolerance %||%
+    config$expected_coordinate_tolerance
+  size_tolerance <- expected_product$size_tolerance %||%
+    config$expected_size_tolerance
+  start_range <- expected_product$start_range %||% c(
+    expected_product$start - coordinate_tolerance,
+    expected_product$start + coordinate_tolerance
+  )
+  end_range <- expected_product$end_range %||% c(
+    expected_product$end - coordinate_tolerance,
+    expected_product$end + coordinate_tolerance
+  )
+  size_range <- expected_product$size_range %||% c(
+    expected_product$size - size_tolerance,
+    expected_product$size + size_tolerance
+  )
+  amplicons$reference_id == expected_product$reference_id &
+    amplicons$start >= min(start_range) &
+    amplicons$start <= max(start_range) &
+    amplicons$end >= min(end_range) &
+    amplicons$end <= max(end_range) &
+    amplicons$product_size >= min(size_range) &
+    amplicons$product_size <= max(size_range) &
+    !amplicons$invalid_size
+}
+
+evaluate_pair_specificity <- function(
+  forward_probe,
+  reverse_probe,
+  references,
+  expected_product,
+  config = primer_qc_defaults()
+) {
+  sites <- bind_rows(
+    enumerate_primer_binding_sites(
+      forward_probe,
+      "forward",
+      references,
+      config
+    ),
+    enumerate_primer_binding_sites(
+      reverse_probe,
+      "reverse",
+      references,
+      config
+    )
+  )
+  amplicons <- enumerate_primer_amplicons(sites, references, config)
+  reduced <- match_probe_pair_all_references(
+    forward_probe,
+    reverse_probe,
+    references,
+    config
+  )
+  if (nrow(amplicons)) {
+    reduced_key <- paste(
+      reduced$reference_id,
+      reduced$start,
+      reduced$end,
+      reduced$product_size,
+      sep = ":"
+    )
+    amplicon_key <- paste(
+      amplicons$reference_id,
+      amplicons$start,
+      amplicons$end,
+      amplicons$product_size,
+      sep = ":"
+    )
+    amplicons$in_match_probe_pair <- amplicon_key %in% reduced_key
+    amplicons$intended <- expected_product_match(
+      amplicons,
+      expected_product,
+      config
+    )
+    amplicons$off_target <- !amplicons$intended
+    amplicons$rejection_reason <- ifelse(
+      amplicons$intended,
+      "",
+      ifelse(
+        amplicons$invalid_size,
+        "invalid_product_size",
+        "off_target_product"
+      )
+    )
+  } else {
+    amplicons$in_match_probe_pair <- logical()
+    amplicons$intended <- logical()
+    amplicons$off_target <- logical()
+    amplicons$rejection_reason <- character()
+  }
+  intended_count <- sum(amplicons$intended)
+  allowed_expected <- expected_product$allowed_products %||% 1L
+  valid_offtargets <- amplicons$off_target & !amplicons$invalid_size
+  offtarget_count <- sum(valid_offtargets)
+  high_risk <- valid_offtargets &
+    amplicons$forward_mismatches_3p == 0L &
+    amplicons$reverse_mismatches_3p == 0L
+  offtarget_site_ids <- unique(c(
+    amplicons$forward_site_id[valid_offtargets],
+    amplicons$reverse_site_id[valid_offtargets]
+  ))
+  perfect_3p_sites <- sites$site_id %in% offtarget_site_ids &
+    sites$mismatches_3p == 0L
+  reasons <- character()
+  if (intended_count < 1L) {
+    reasons <- c(reasons, "expected_product_not_found")
+  }
+  if (intended_count > allowed_expected) {
+    reasons <- c(reasons, "too_many_expected_products")
+  }
+  if (offtarget_count > config$max_allowed_offtarget_products) {
+    reasons <- c(reasons, sprintf("off_target_products=%d", offtarget_count))
+  }
+  report_site_key <- paste(
+    sites$primer_id,
+    sites$reference_id,
+    sites$start,
+    sites$end,
+    sites$strand,
+    sites$mismatches,
+    sites$mismatch_positions,
+    sep = ":"
+  )
+  list(
+    passed = !length(reasons),
+    rejection_reason = paste(reasons, collapse = ";"),
+    binding_sites = sites[!duplicated(report_site_key), , drop = FALSE],
+    amplicons = amplicons,
+    match_probe_pair_amplicons = reduced,
+    n_high_risk_offtarget_products = sum(high_risk),
+    n_all_offtarget_products = offtarget_count,
+    n_perfect_3p_offtarget_sites = sum(perfect_3p_sites),
+    n_expected_products = intended_count,
+    n_reduced_matches_missed = sum(!amplicons$in_match_probe_pair)
+  )
+}
+
+assert_openprimer_constraints <- function(active_constraints, required_constraints) {
+  missing <- setdiff(required_constraints, active_constraints)
+  if (length(missing)) {
+    stop(
+      sprintf(
+        paste(
+          "openPrimeR отключил обязательные constraints: %s.",
+          "Проверьте внешние программы до запуска primer QC"
+        ),
+        paste(missing, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
+configure_openprimer_environment <- function() {
+  current <- Sys.getenv("UNAFOLDDAT", unset = "")
+  if (nzchar(current) && file.exists(file.path(current, "stack.DAT"))) {
+    return(invisible(current))
+  }
+  hybrid_min <- Sys.which("hybrid-min")
+  candidates <- unique(c(
+    if (nzchar(hybrid_min)) {
+      file.path(dirname(dirname(hybrid_min)), "share", "oligoarrayaux")
+    },
+    "/usr/local/share/oligoarrayaux"
+  ))
+  candidates <- candidates[
+    file.exists(file.path(candidates, "stack.DAT")) &
+      file.exists(file.path(candidates, "miscloop.DAT"))
+  ]
+  if (length(candidates)) {
+    Sys.setenv(UNAFOLDDAT = candidates[[1]])
+    return(invisible(candidates[[1]]))
+  }
+  invisible("")
+}
+
+validate_openprimer_tools <- function(required_constraints) {
+  configure_openprimer_environment()
+  constraint_tools <- list(
+    melting_temp_range = c(MELTING = "melting-batch"),
+    melting_temp_diff = c(MELTING = "melting-batch"),
+    self_dimerization = c(OligoArrayAux = "hybrid-min"),
+    cross_dimerization = c(OligoArrayAux = "hybrid-min"),
+    secondary_structure = c(ViennaRNA = "RNAfold"),
+    primer_efficiency = c(OligoArrayAux = "hybrid-min"),
+    annealing_DeltaG = c(OligoArrayAux = "hybrid-min")
+  )
+  tools <- unique(unlist(constraint_tools[required_constraints]))
+  missing <- tools[!nzchar(Sys.which(unname(tools)))]
+  if (length(missing)) {
+    stop(
+      sprintf(
+        "Для обязательного openPrimeR QC недоступны: %s",
+        paste(paste(names(missing), unname(missing), sep = "="), collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+  if ("hybrid-min" %in% unname(tools)) {
+    status <- suppressWarnings(system2(
+      Sys.which("hybrid-min"),
+      c(
+        "-n", "DNA", "-t", "50", "-T", "50", "-N", "0.05", "-E",
+        "-q", "ACAGGTGCCCACTCCCAGGTGCAG",
+        "CTGCACCTGGGAGTGGGCACCTGT"
+      ),
+      stdout = FALSE,
+      stderr = FALSE
+    ))
+    if (!identical(status, 0L)) {
+      stop(
+        paste(
+          "OligoArrayAux найден, но hybrid-min не работает.",
+          "Проверьте UNAFOLDDAT"
+        ),
+        call. = FALSE
+      )
+    }
+  }
+  invisible(tools)
+}
+
+load_openprimer_settings <- function(
+  config = primer_qc_defaults(),
+  buffer = primer3_buffer_parameters()
+) {
+  configure_openprimer_environment()
+  if (!requireNamespace("openPrimeR", quietly = TRUE)) {
+    stop("R-пакет openPrimeR не установлен", call. = FALSE)
+  }
+  profile <- system.file(
+    "extdata",
+    "settings",
+    config$openprimer_profile,
+    package = "openPrimeR"
+  )
+  if (!nzchar(profile)) {
+    stop(
+      sprintf("Не найден профиль openPrimeR: %s", config$openprimer_profile),
+      call. = FALSE
+    )
+  }
+  settings <- openPrimeR::read_settings(profile)
+  required <- unique(c(
+    config$openprimer_critical_annealing,
+    config$openprimer_critical_full
+  ))
+  active <- names(openPrimeR::constraints(settings))
+  assert_openprimer_constraints(active, required)
+  validate_openprimer_tools(c(required, "primer_efficiency"))
+
+  coverage_constraints <- list(
+    primer_efficiency = c(min = config$primer_efficiency_min)
+  )
+  settings <- openPrimeR::`cvg_constraints<-`(
+    settings,
+    coverage_constraints
+  )
+  options <- openPrimeR::conOptions(settings)
+  options$allowed_mismatches <- config$max_mismatches
+  settings <- openPrimeR::`conOptions<-`(settings, options)
+  pcr <- openPrimeR::PCR(settings)
+  pcr$Na_concentration <- 0
+  pcr$K_concentration <- buffer[["monovalent_salt_mm"]] / 1000
+  pcr$Mg_concentration <- buffer[["divalent_salt_mm"]] / 1000
+  pcr$primer_concentration <- buffer[["dna_nm"]] * 1e-9
+  settings <- openPrimeR::`PCR<-`(settings, pcr)
+  list(
+    settings = settings,
+    active_constraints = active,
+    required_constraints = required,
+    profile = profile,
+    pcr = pcr,
+    unit_notes = c(
+      monovalent_salt = "Primer3 mM -> openPrimeR mol/L (K)",
+      divalent_salt = "Primer3 mM -> openPrimeR mol/L (Mg)",
+      primer_dna = "Primer3 nM -> openPrimeR mol/L",
+      dntp = "Primer3 dNTP has no openPrimeR PCR field"
+    )
+  )
+}
+
+make_openprimer_objects <- function(forward, reverse, template, id) {
+  primer_path <- tempfile("2pac-openprimer-primers-", fileext = ".fasta")
+  template_path <- tempfile("2pac-openprimer-template-", fileext = ".fasta")
+  on.exit(unlink(c(primer_path, template_path)), add = TRUE)
+  writeXStringSet(
+    DNAStringSet(setNames(c(forward, reverse), paste0(id, c("_fw", "_rev")))),
+    primer_path
+  )
+  writeXStringSet(DNAStringSet(setNames(template, paste0(id, "_template"))), template_path)
+  list(
+    primers = openPrimeR::read_primers(primer_path),
+    templates = openPrimeR::read_templates(
+      template_path,
+      fw.region = c(1L, nchar(template)),
+      rev.region = c(1L, nchar(template))
+    )
+  )
+}
+
+openprimer_sequence_forms <- function(
+  reaction,
+  annealing_forward,
+  annealing_reverse,
+  full_forward,
+  full_reverse
+) {
+  data.frame(
+    reaction = rep(reaction, 2L),
+    primer_id = c("forward", "reverse"),
+    annealing_sequence = c(annealing_forward, annealing_reverse),
+    full_oligo_sequence = c(full_forward, full_reverse),
+    stringsAsFactors = FALSE
+  )
+}
+
+with_openprimer_locale <- function(expression) {
+  old_monetary_locale <- Sys.getlocale("LC_MONETARY")
+  monetary_locale <- suppressWarnings(Sys.setlocale("LC_MONETARY", "en_US.UTF-8"))
+  if (is.na(monetary_locale) || !nzchar(Sys.localeconv()[["mon_decimal_point"]])) {
+    stop(
+      paste(
+        "openPrimeR/MELTING требует locale с monetary decimal point;",
+        "не удалось включить en_US.UTF-8"
+      ),
+      call. = FALSE
+    )
+  }
+  on.exit(Sys.setlocale("LC_MONETARY", old_monetary_locale), add = TRUE)
+  force(expression)
+}
+
+evaluate_openprimer_form <- function(
+  forward,
+  reverse,
+  template_sequence,
+  settings,
+  active_constraints,
+  identifier
+) {
+  objects <- make_openprimer_objects(
+    forward,
+    reverse,
+    template_sequence,
+    identifier
+  )
+  qc <- with_openprimer_locale(openPrimeR::check_constraints(
+    objects$primers,
+    objects$templates,
+    settings,
+    active.constraints = active_constraints
+  ))
+  qc_frame <- as.data.frame(qc, stringsAsFactors = FALSE)
+  metrics <- data.frame(
+    lapply(qc_frame, identity),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  passed <- isTRUE(metrics$constraints_passed[[1]])
+  metrics$constraints_passed <- NULL
+  score <- openPrimeR::score_primers(
+    qc,
+    settings,
+    active.constraints = active_constraints
+  )
+  list(
+    metrics = metrics,
+    passed = passed,
+    penalty = score$Penalty[[1]],
+    active_constraints = active_constraints
+  )
+}
+
+combine_openprimer_form_results <- function(
+  annealing_result,
+  full_result,
+  sequence_forms,
+  loaded,
+  config,
+  reaction
+) {
+  annealing_metrics <- annealing_result$metrics
+  full_metrics <- if (is.null(full_result)) data.frame() else full_result$metrics
+  input_columns <- c(
+    "Identifier", "ID", "Forward", "Reverse", "primer_length_fw",
+    "primer_length_rev", "Direction", "Degeneracy_fw", "Degeneracy_rev", "Run"
+  )
+  if (ncol(full_metrics)) {
+    full_metrics <- full_metrics[
+      ,
+      setdiff(names(full_metrics), input_columns),
+      drop = FALSE
+    ]
+    duplicate_columns <- intersect(names(full_metrics), names(annealing_metrics))
+    names(full_metrics)[names(full_metrics) %in% duplicate_columns] <- paste0(
+      "full_",
+      names(full_metrics)[names(full_metrics) %in% duplicate_columns]
+    )
+    metrics <- cbind(annealing_metrics, full_metrics)
+  } else {
+    metrics <- annealing_metrics
+  }
+  eval_columns <- grep("^EVAL_", names(metrics), value = TRUE)
+  soft_eval <- intersect(
+    paste0("EVAL_", config$openprimer_soft_constraints),
+    eval_columns
+  )
+  dimer_values <- unlist(metrics[, intersect(
+    c("Self_Dimer_DeltaG", "Cross_Dimer_DeltaG", "Structure_deltaG"),
+    names(metrics)
+  ), drop = FALSE])
+  dimer_values <- suppressWarnings(as.numeric(dimer_values))
+  dimer_values <- dimer_values[is.finite(dimer_values)]
+  evaluated_constraints <- c(
+    annealing_result$active_constraints,
+    if (!is.null(full_result)) full_result$active_constraints
+  )
+  metrics$reaction <- reaction
+  metrics$annealing_forward <- sequence_forms$annealing_sequence[[1]]
+  metrics$annealing_reverse <- sequence_forms$annealing_sequence[[2]]
+  metrics$full_forward <- sequence_forms$full_oligo_sequence[[1]]
+  metrics$full_reverse <- sequence_forms$full_oligo_sequence[[2]]
+  metrics$annealing_constraints_passed <- annealing_result$passed
+  metrics$full_constraints_passed <- !is.null(full_result) && full_result$passed
+  metrics$constraints_passed <- annealing_result$passed &&
+    !is.null(full_result) && full_result$passed
+  metrics$penalty <- annealing_result$penalty + if (is.null(full_result)) {
+    0
+  } else full_result$penalty
+  metrics$openprimer_failed_soft_constraints <- if (length(soft_eval)) {
+    sum(!unlist(metrics[1, soft_eval, drop = FALSE]))
+  } else 0L
+  metrics$max_dimer_risk <- if (length(dimer_values)) {
+    max(0, -min(dimer_values))
+  } else 0
+  metrics$abs_tm_diff <- abs(metrics$melting_temp_diff[[1]])
+  metrics$unavailable_constraints <- ""
+  metrics$skipped_constraints <- paste(
+    setdiff(loaded$active_constraints, evaluated_constraints),
+    collapse = ","
+  )
+  failed <- eval_columns[!unlist(metrics[1, eval_columns, drop = FALSE])]
+  list(
+    passed = isTRUE(metrics$constraints_passed[[1]]),
+    rejection_reason = if (isTRUE(metrics$constraints_passed[[1]])) "" else {
+      paste0("openprimer_failed:", paste(failed, collapse = ","))
+    },
+    metrics = metrics,
+    penalty = metrics$penalty[[1]],
+    failed_soft_constraints = metrics$openprimer_failed_soft_constraints[[1]],
+    max_dimer_risk = metrics$max_dimer_risk[[1]],
+    abs_tm_diff = metrics$abs_tm_diff[[1]],
+    unavailable_constraints = character(),
+    skipped_constraints = if (nzchar(metrics$skipped_constraints[[1]])) {
+      strsplit(metrics$skipped_constraints[[1]], ",", fixed = TRUE)[[1]]
+    } else character()
+  )
+}
+
+evaluate_openprimer_pair <- function(
+  annealing_forward,
+  annealing_reverse,
+  full_forward,
+  full_reverse,
+  template_sequence,
+  config = primer_qc_defaults(),
+  buffer = primer3_buffer_parameters(),
+  loaded_settings = NULL,
+  reaction = "reaction"
+) {
+  loaded <- loaded_settings %||% load_openprimer_settings(config, buffer)
+  sequence_forms <- openprimer_sequence_forms(
+    reaction,
+    annealing_forward,
+    annealing_reverse,
+    full_forward,
+    full_reverse
+  )
+  annealing_constraints <- unique(c(
+    config$openprimer_critical_annealing,
+    "primer_coverage"
+  ))
+  full_constraints <- config$openprimer_critical_full
+  annealing_result <- evaluate_openprimer_form(
+    annealing_forward,
+    annealing_reverse,
+    template_sequence,
+    loaded$settings,
+    annealing_constraints,
+    paste0(reaction, "_annealing")
+  )
+  full_result <- NULL
+  if (annealing_result$passed) {
+    full_template <- paste0(
+      full_forward,
+      paste(rep("A", 20L), collapse = ""),
+      as.character(reverseComplement(DNAString(full_reverse)))
+    )
+    full_result <- evaluate_openprimer_form(
+      full_forward,
+      full_reverse,
+      full_template,
+      loaded$settings,
+      full_constraints,
+      paste0(reaction, "_full")
+    )
+  }
+  combine_openprimer_form_results(
+    annealing_result,
+    full_result,
+    sequence_forms,
+    loaded,
+    config,
+    reaction
+  )
+}
+
+select_best_primer_pair <- function(candidates) {
+  required_gates <- c(
+    "structure_passed",
+    "specificity_passed",
+    "openprimer_passed"
+  )
+  missing_gates <- setdiff(required_gates, names(candidates))
+  if (length(missing_gates)) {
+    stop(
+      sprintf(
+        "Таблица ranking не содержит hard gates: %s",
+        paste(missing_gates, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+  rank_columns <- c(
+    "n_high_risk_offtarget_products",
+    "n_all_offtarget_products",
+    "n_perfect_3p_offtarget_sites",
+    "openprimer_failed_soft_constraints",
+    "openprimer_penalty",
+    "max_dimer_risk",
+    "abs_tm_diff",
+    "primer3_pair_penalty",
+    "deleted_nt",
+    "primer3_index"
+  )
+  for (column in setdiff(rank_columns, names(candidates))) {
+    candidates[[column]] <- Inf
+  }
+  gate_values <- lapply(candidates[required_gates], function(value) {
+    !is.na(value) & as.logical(value)
+  })
+  eligible <- Reduce(`&`, gate_values)
+  candidates$selected <- FALSE
+  gate_reasons <- apply(
+    as.data.frame(gate_values),
+    1L,
+    function(status) paste(
+      sub("_passed$", "", required_gates[!status]),
+      collapse = ","
+    )
+  )
+  if (!"rejection_reason" %in% names(candidates)) {
+    candidates$rejection_reason <- ""
+  }
+  candidates$rejection_reason[!eligible] <- ifelse(
+    nzchar(candidates$rejection_reason[!eligible]),
+    candidates$rejection_reason[!eligible],
+    paste0("hard_gate:", gate_reasons[!eligible])
+  )
+  if (!any(eligible)) {
+    return(list(pair = NULL, ranking = candidates))
+  }
+  eligible_indices <- which(eligible)
+  order_args <- lapply(
+    candidates[eligible_indices, rank_columns, drop = FALSE],
+    function(values) {
+      values <- suppressWarnings(as.numeric(values))
+      values[is.na(values)] <- Inf
+      values
+    }
+  )
+  selected_index <- eligible_indices[do.call(order, order_args)[[1]]]
+  candidates$selected[[selected_index]] <- TRUE
+  candidates$rejection_reason[eligible & !candidates$selected] <-
+    "lower_deterministic_rank"
+  list(
+    pair = candidates[selected_index, , drop = FALSE],
+    ranking = candidates
+  )
+}
+
 output_layout <- function(output_dir) {
   list(
     wet_lab = file.path(output_dir, "WetLab"),
@@ -427,6 +1495,34 @@ output_layout <- function(output_dir) {
 }
 
 write_run_parameters <- function(input, targets, path) {
+  openprimer_key <- ".openprimer_settings"
+  loaded_openprimer <- if (exists(
+    openprimer_key,
+    input$primer_qc_cache,
+    inherits = FALSE
+  )) {
+    get(openprimer_key, input$primer_qc_cache, inherits = FALSE)
+  } else NULL
+  openprimer_limits <- character()
+  if (!is.null(loaded_openprimer)) {
+    selected_limits <- openPrimeR::constraints(loaded_openprimer$settings)[
+      loaded_openprimer$required_constraints
+    ]
+    openprimer_limits <- unlist(lapply(
+      names(selected_limits),
+      function(constraint) {
+        setNames(
+          selected_limits[[constraint]],
+          paste0(
+            "openprimer_constraint_",
+            constraint,
+            "_",
+            names(selected_limits[[constraint]])
+          )
+        )
+      }
+    ))
+  }
   parameters <- c(
     generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
     genome_file = input$genome_path,
@@ -447,13 +1543,13 @@ write_run_parameters <- function(input, targets, path) {
       "genome_indexes"
     ),
     chopchop_script = input$tools$chopchop_script,
+    chopchop_python = input$tools$chopchop_python,
     chopchop_config_snapshot = file.path(
       output_layout(input$output_dir)$tech_report,
       "chopchop_config.json"
     ),
     primer3_executable = input$tools$primer3,
     primer3_thermodynamic_parameters = input$tools$primer3_config,
-    virtual_pcr_jar = input$tools$virtual_pcr_jar,
     n20_count = input$parameters$n20_mn,
     n20_strands = input$parameters$n20_strands,
     n20_offtarget_thresholds = paste(
@@ -474,7 +1570,34 @@ write_run_parameters <- function(input, targets, path) {
     setNames(
       input$parameters$primer3_buffer,
       paste0("primer3_buffer_", names(input$parameters$primer3_buffer))
-    )
+    ),
+    primer_qc_max_mismatches = input$parameters$primer_qc$max_mismatches,
+    primer_qc_critical_3p_bases = input$parameters$primer_qc$critical_3p_bases,
+    primer_qc_max_3p_mismatches =
+      input$parameters$primer_qc$max_3p_mismatches,
+    primer_qc_min_product_size = input$parameters$primer_qc$min_product_size,
+    primer_qc_max_product_size = input$parameters$primer_qc$max_product_size,
+    primer_qc_max_allowed_offtarget_products =
+      input$parameters$primer_qc$max_allowed_offtarget_products,
+    primer_qc_primer_efficiency_min =
+      input$parameters$primer_qc$primer_efficiency_min,
+    openprimer_profile = input$parameters$primer_qc$openprimer_profile,
+    openprimer_active_constraints = if (is.null(loaded_openprimer)) NA else {
+      paste(loaded_openprimer$active_constraints, collapse = ",")
+    },
+    openprimer_required_constraints = if (is.null(loaded_openprimer)) NA else {
+      paste(loaded_openprimer$required_constraints, collapse = ",")
+    },
+    openprimer_limits,
+    openprimer_version = tryCatch(
+      as.character(utils::packageVersion("openPrimeR")),
+      error = function(e) NA_character_
+    ),
+    biostrings_version = as.character(packageVersion("Biostrings")),
+    melting_executable = Sys.which("melting-batch"),
+    viennarna_executable = Sys.which("RNAfold"),
+    oligoarrayaux_executable = Sys.which("hybrid-min"),
+    mafft_executable = Sys.which("mafft")
   )
   write_tsv(
     data.frame(
@@ -491,7 +1614,12 @@ make_design_input <- function(cli) {
   # TODO: only a complete single-contig bacterial genome is supported for now.
   # Multi-contig FASTA/GFF input needs contig-aware sequence extraction.
   genome_set <- readDNAStringSet(cli$genome[[1]], nrec = 1)
-  list(
+  references <- make_specificity_references(
+    cli$genome[[1]],
+    cli$target_plasmid[[1]],
+    if (length(cli$cas_plasmid)) cli$cas_plasmid[[1]] else NULL
+  )
+  input <- list(
     genome_path = cli$genome[[1]],
     annotation_path = cli$genome_annotation[[1]],
     annotation_format = cli$annotation_format[[1]],
@@ -506,9 +1634,9 @@ make_design_input <- function(cli) {
     output_dir = cli$output_dir[[1]],
     tools = list(
       chopchop_script = cli$chopchop_script[[1]],
+      chopchop_python = cli$chopchop_python[[1]],
       primer3 = cli$primer3[[1]],
-      primer3_config = "primer3/src/primer3_config",
-      virtual_pcr_jar = cli$virtual_pcr_jar[[1]]
+      primer3_config = "primer3/src/primer3_config"
     ),
     parameters = list(
       n20_mn = cli$n20_mn,
@@ -519,9 +1647,23 @@ make_design_input <- function(cli) {
       left_arm = cli$left_arm,
       right_arm = cli$right_arm,
       n20_arm_min_distance = cli$n20_arm_min_distance,
-      primer3_buffer = primer3_buffer_parameters()
-    )
+      primer3_buffer = primer3_buffer_parameters(),
+      primer_qc = cli$primer_qc
+    ),
+    specificity_references = references,
+    specificity_reference_digest = reference_digest(references),
+    primer_qc_cache = new.env(parent = emptyenv())
   )
+  genome_ids <- references$reference_id[
+    references$reference_type == "genome" &
+      references$source_name == input$genome_contig
+  ]
+  input$genome_reference_id <- if (length(genome_ids)) {
+    genome_ids[[1]]
+  } else {
+    references$reference_id[references$reference_type == "genome"][[1]]
+  }
+  input
 }
 
 feature_record <- function(input, gene_name) {
@@ -647,7 +1789,7 @@ run_chopchop <- function(
   target <- paste0(feature$contig, ":", interval[[1]], "-", interval[[2]])
   table_path <- file.path(target_dir, "n20_table.tsv")
   run_tool(
-    "python",
+    input$tools$chopchop_python,
     c(
       input$tools$chopchop_script,
       "-Target",
@@ -905,8 +2047,8 @@ add_genome_positions <- function(left, right, arm, plus_strand) {
   } else {
     left <- mutate(
       left,
-      genome_start = arm$left_end - PRIMER_RIGHT_pos - 1,
-      genome_end = arm$left_end - PRIMER_LEFT_pos - 1
+      genome_start = arm$left_end - PRIMER_RIGHT_pos + 1,
+      genome_end = arm$left_end - PRIMER_LEFT_pos + 1
     )
     right <- mutate(
       right,
@@ -915,6 +2057,63 @@ add_genome_positions <- function(left, right, arm, plus_strand) {
     )
   }
   list(left = left, right = right)
+}
+
+structural_pair_candidates <- function(
+  primers,
+  plus_strand,
+  feature,
+  selected,
+  minimum_n20_distance,
+  restrict_frame_shift
+) {
+  left <- primers$left
+  right <- primers$right
+  candidates <- list()
+  if (!nrow(left) || !nrow(right)) {
+    return(data.frame(
+      left_index = integer(), right_index = integer(),
+      deleted_nt = integer(), left_distance = integer(),
+      right_distance = integer(), stringsAsFactors = FALSE
+    ))
+  }
+  for (left_index in seq_len(nrow(left))) {
+    for (right_index in seq_len(nrow(right))) {
+      if (plus_strand) {
+        lower_boundary <- left$genome_end[[left_index]]
+        upper_boundary <- right$genome_start[[right_index]]
+      } else {
+        lower_boundary <- right$genome_end[[right_index]]
+        upper_boundary <- left$genome_start[[left_index]]
+      }
+      deleted_nt <- upper_boundary - lower_boundary - 1L
+      left_distance <- selected$n20_range[[1]] - lower_boundary - 1L
+      right_distance <- upper_boundary - selected$n20_range[[2]] - 1L
+      eligible <- deleted_nt >= 0L &&
+        deleted_nt < feature$length &&
+        left_distance >= minimum_n20_distance &&
+        right_distance >= minimum_n20_distance &&
+        (!restrict_frame_shift || deleted_nt %% 3L == 0L)
+      if (eligible) {
+        candidates[[length(candidates) + 1L]] <- data.frame(
+          left_index = left_index,
+          right_index = right_index,
+          deleted_nt = deleted_nt,
+          left_distance = left_distance,
+          right_distance = right_distance,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  if (!length(candidates)) {
+    return(data.frame(
+      left_index = integer(), right_index = integer(),
+      deleted_nt = integer(), left_distance = integer(),
+      right_distance = integer(), stringsAsFactors = FALSE
+    ))
+  }
+  bind_rows(candidates)
 }
 
 choose_pair <- function(
@@ -927,50 +2126,384 @@ choose_pair <- function(
 ) {
   left <- primers$left
   right <- primers$right
-  if (!nrow(left) || !nrow(right)) {
+  candidates <- structural_pair_candidates(
+    primers,
+    plus_strand,
+    feature,
+    selected,
+    minimum_n20_distance,
+    restrict_frame_shift
+  )
+  if (!nrow(candidates)) {
     return(NULL)
   }
-  if (plus_strand) {
-    deleted <- outer(right$genome_start, left$genome_end, "-") - 1
-    lower_boundary <- matrix(
-      rep(left$genome_end, each = nrow(right)),
-      nrow = nrow(right)
-    )
-    upper_boundary <- matrix(
-      rep(right$genome_start, nrow(left)),
-      nrow = nrow(right)
-    )
-  } else {
-    deleted <- outer(left$genome_start, right$genome_end, "-") - 1
-    lower_boundary <- matrix(
-      rep(right$genome_end, each = nrow(left)),
-      nrow = nrow(left)
-    )
-    upper_boundary <- matrix(
-      rep(left$genome_start, nrow(right)),
-      nrow = nrow(left)
+  selected_index <- order(
+    candidates$deleted_nt,
+    candidates$left_index,
+    candidates$right_index
+  )[[1]]
+  candidate <- candidates[selected_index, , drop = FALSE]
+  bind_rows(
+    left[candidate$left_index[[1]], , drop = FALSE],
+    right[candidate$right_index[[1]], , drop = FALSE]
+  )
+}
+
+new_primer_qc_trace <- function() {
+  trace <- new.env(parent = emptyenv())
+  trace$binding_sites <- list()
+  trace$amplicons <- list()
+  trace$openprimer <- list()
+  trace$ranking <- list()
+  trace
+}
+
+append_primer_qc_trace <- function(
+  trace,
+  reaction,
+  pair_id,
+  specificity = NULL,
+  openprimer = NULL,
+  ranking = NULL
+) {
+  if (!is.null(specificity)) {
+    sites <- specificity$binding_sites
+    sites$reaction <- reaction
+    sites$pair_id <- pair_id
+    trace$binding_sites[[length(trace$binding_sites) + 1L]] <- sites
+    amplicons <- specificity$amplicons
+    amplicons$reaction <- reaction
+    amplicons$pair_id <- pair_id
+    trace$amplicons[[length(trace$amplicons) + 1L]] <- amplicons
+  }
+  if (!is.null(openprimer)) {
+    metrics <- openprimer$metrics
+    metrics$pair_id <- pair_id
+    trace$openprimer[[length(trace$openprimer) + 1L]] <- metrics
+  }
+  if (!is.null(ranking)) {
+    trace$ranking[[length(trace$ranking) + 1L]] <- ranking
+  }
+  invisible(trace)
+}
+
+write_primer_qc_trace <- function(trace, target_dir) {
+  bind_or_empty <- function(records, empty, label) {
+    if (!length(records)) {
+      return(empty)
+    }
+    tryCatch(
+      bind_rows(records),
+      error = function(e) {
+        stop(
+          sprintf("Не удалось собрать primer QC trace '%s': %s", label, e$message),
+          call. = FALSE
+        )
+      }
     )
   }
-  left_distance <- selected$n20_range[[1]] - lower_boundary - 1L
-  right_distance <- upper_boundary - selected$n20_range[[2]] - 1L
-  eligible <- deleted >= 0L &
-    deleted < feature$length &
-    left_distance >= minimum_n20_distance &
-    right_distance >= minimum_n20_distance
-  if (restrict_frame_shift) {
-    eligible <- eligible & deleted %% 3 == 0
+  sites <- bind_or_empty(
+    trace$binding_sites,
+    data.frame(
+      reaction = character(), pair_id = character(), primer_id = character(),
+      reference_id = character(), reference_type = character(),
+      start = integer(), end = integer(), strand = character(),
+      mismatches = integer(), mismatch_positions = character(),
+      mismatches_3p = integer(), stringsAsFactors = FALSE
+    ),
+    "binding_sites"
+  )
+  site_columns <- c(
+    "reaction", "pair_id", "primer_id", "reference_id", "reference_type",
+    "start", "end", "strand", "mismatches", "mismatch_positions",
+    "mismatches_3p", "passes_3p", "circular_wrap"
+  )
+  for (column in setdiff(site_columns, names(sites))) {
+    sites[[column]] <- rep(NA, nrow(sites))
   }
-  indices <- which(eligible)
-  if (!length(indices)) {
-    return(NULL)
+  write_tsv(
+    sites[, site_columns, drop = FALSE],
+    file.path(target_dir, "primer_binding_sites.tsv")
+  )
+
+  amplicons <- bind_or_empty(
+    trace$amplicons,
+    data.frame(
+      reaction = character(), pair_id = character(), reference_id = character(),
+      start = integer(), end = integer(), product_size = integer(),
+      intended = logical(), off_target = logical(), circular_wrap = logical(),
+      rejection_reason = character(), stringsAsFactors = FALSE
+    ),
+    "amplicons"
+  )
+  amplicon_columns <- c(
+    "reaction", "pair_id", "reference_id", "reference_type", "start", "end",
+    "product_size", "intended", "off_target", "invalid_size",
+    "circular_wrap", "in_match_probe_pair", "rejection_reason"
+  )
+  for (column in setdiff(amplicon_columns, names(amplicons))) {
+    amplicons[[column]] <- rep(NA, nrow(amplicons))
   }
-  index <- indices[[which.min(deleted[indices])]]
-  rc <- arrayInd(index, dim(deleted))
-  if (plus_strand) {
-    bind_rows(left[rc[[2]], ], right[rc[[1]], ])
-  } else {
-    bind_rows(left[rc[[1]], ], right[rc[[2]], ])
+  write_tsv(
+    amplicons[, amplicon_columns, drop = FALSE],
+    file.path(target_dir, "primer_amplicons.tsv")
+  )
+
+  openprimer <- bind_or_empty(
+    trace$openprimer,
+    data.frame(
+      reaction = character(), pair_id = character(),
+      constraints_passed = logical(), penalty = numeric(),
+      stringsAsFactors = FALSE
+    ),
+    "openprimer"
+  )
+  list_columns <- names(openprimer)[vapply(openprimer, is.list, logical(1))]
+  for (column in list_columns) {
+    openprimer[[column]] <- vapply(
+      openprimer[[column]],
+      function(value) paste(value, collapse = ","),
+      character(1)
+    )
   }
+  text_columns <- names(openprimer)[vapply(
+    openprimer,
+    function(column) is.character(column) || is.factor(column),
+    logical(1)
+  )]
+  for (column in text_columns) {
+    openprimer[[column]] <- gsub(
+      "[\r\n\t]+",
+      " ",
+      as.character(openprimer[[column]])
+    )
+  }
+  write_tsv(
+    openprimer,
+    file.path(target_dir, "primer_openprimer_qc.tsv")
+  )
+
+  ranking <- bind_or_empty(
+    trace$ranking,
+    data.frame(
+      pair_id = character(), reaction = character(),
+      primer3_index = integer(), structure_passed = logical(),
+      specificity_passed = logical(), openprimer_passed = logical(),
+      selected = logical(), rejection_reason = character(),
+      stringsAsFactors = FALSE
+    ),
+    "ranking"
+  )
+  write_tsv(ranking, file.path(target_dir, "primer_pair_ranking.tsv"))
+  invisible(target_dir)
+}
+
+cached_pair_specificity <- function(input, forward, reverse, expected_product) {
+  config <- input$parameters$primer_qc
+  key <- paste0(
+    "specificity:",
+    digest::digest(list(
+      input$specificity_reference_digest,
+      toupper(forward),
+      toupper(reverse),
+      expected_product,
+      config[c(
+        "max_mismatches",
+        "critical_3p_bases",
+        "max_3p_mismatches",
+        "min_product_size",
+        "max_product_size",
+        "max_allowed_offtarget_products",
+        "expected_coordinate_tolerance",
+        "expected_size_tolerance"
+      )]
+    ))
+  )
+  if (!exists(key, input$primer_qc_cache, inherits = FALSE)) {
+    assign(
+      key,
+      evaluate_pair_specificity(
+        forward,
+        reverse,
+        input$specificity_references,
+        expected_product,
+        config
+      ),
+      input$primer_qc_cache
+    )
+  }
+  get(key, input$primer_qc_cache, inherits = FALSE)
+}
+
+cached_openprimer_pair <- function(
+  input,
+  annealing_forward,
+  annealing_reverse,
+  full_forward,
+  full_reverse,
+  template_sequence,
+  reaction
+) {
+  config <- input$parameters$primer_qc
+  settings_key <- ".openprimer_settings"
+  if (!exists(settings_key, input$primer_qc_cache, inherits = FALSE)) {
+    loaded <- tryCatch(
+      load_openprimer_settings(config, input$parameters$primer3_buffer),
+      error = function(e) {
+        stop(structure(
+          list(
+            message = conditionMessage(e),
+            call = NULL,
+            stage = "primer_qc",
+            parent = e
+          ),
+          class = c("primer_qc_error", "error", "condition")
+        ))
+      }
+    )
+    assign(settings_key, loaded, input$primer_qc_cache)
+  }
+  loaded <- get(settings_key, input$primer_qc_cache, inherits = FALSE)
+  sequence_forms <- openprimer_sequence_forms(
+    reaction,
+    annealing_forward,
+    annealing_reverse,
+    full_forward,
+    full_reverse
+  )
+  annealing_constraints <- unique(c(
+    config$openprimer_critical_annealing,
+    "primer_coverage"
+  ))
+  annealing_key <- paste0(
+    "openprimer_annealing:",
+    digest::digest(list(
+      toupper(c(annealing_forward, annealing_reverse, template_sequence)),
+      annealing_constraints,
+      input$parameters$primer3_buffer
+    ))
+  )
+  if (!exists(annealing_key, input$primer_qc_cache, inherits = FALSE)) {
+    assign(
+      annealing_key,
+      evaluate_openprimer_form(
+        annealing_forward,
+        annealing_reverse,
+        template_sequence,
+        loaded$settings,
+        annealing_constraints,
+        paste0(reaction, "_annealing")
+      ),
+      input$primer_qc_cache
+    )
+  }
+  annealing_result <- get(
+    annealing_key,
+    input$primer_qc_cache,
+    inherits = FALSE
+  )
+  full_result <- NULL
+  if (annealing_result$passed) {
+    full_constraints <- config$openprimer_critical_full
+    full_key <- paste0(
+      "openprimer_full:",
+      digest::digest(list(
+        toupper(c(full_forward, full_reverse)),
+        full_constraints,
+        input$parameters$primer3_buffer
+      ))
+    )
+    if (!exists(full_key, input$primer_qc_cache, inherits = FALSE)) {
+      full_template <- paste0(
+        full_forward,
+        paste(rep("A", 20L), collapse = ""),
+        as.character(reverseComplement(DNAString(full_reverse)))
+      )
+      assign(
+        full_key,
+        evaluate_openprimer_form(
+          full_forward,
+          full_reverse,
+          full_template,
+          loaded$settings,
+          full_constraints,
+          paste0(reaction, "_full")
+        ),
+        input$primer_qc_cache
+      )
+    }
+    full_result <- get(full_key, input$primer_qc_cache, inherits = FALSE)
+  }
+  combine_openprimer_form_results(
+    annealing_result,
+    full_result,
+    sequence_forms,
+    loaded,
+    config,
+    reaction
+  )
+}
+
+expected_product_from_primer3 <- function(input, primer_row) {
+  size <- primer_row$genome_end[[1]] - primer_row$genome_start[[1]] + 1L
+  list(
+    reference_id = input$genome_reference_id,
+    start = as.integer(primer_row$genome_start[[1]]),
+    end = as.integer(primer_row$genome_end[[1]]),
+    size = as.integer(size),
+    allowed_products = 1L
+  )
+}
+
+evaluate_candidate_reaction <- function(
+  input,
+  primer_row,
+  full_forward,
+  full_reverse,
+  reaction,
+  pair_id,
+  trace
+) {
+  forward <- primer_row$PRIMER_LEFT_SEQUENCE[[1]]
+  reverse <- primer_row$PRIMER_RIGHT_SEQUENCE[[1]]
+  expected <- expected_product_from_primer3(input, primer_row)
+  specificity <- cached_pair_specificity(input, forward, reverse, expected)
+  append_primer_qc_trace(
+    trace,
+    reaction,
+    pair_id,
+    specificity = specificity
+  )
+  if (!specificity$passed) {
+    return(list(
+      passed = FALSE,
+      specificity = specificity,
+      openprimer = NULL,
+      rejection_reason = specificity$rejection_reason
+    ))
+  }
+  intended <- specificity$amplicons[specificity$amplicons$intended, , drop = FALSE]
+  openprimer <- cached_openprimer_pair(
+    input,
+    forward,
+    reverse,
+    full_forward,
+    full_reverse,
+    intended$sequence[[1]],
+    reaction
+  )
+  append_primer_qc_trace(
+    trace,
+    reaction,
+    pair_id,
+    openprimer = openprimer
+  )
+  list(
+    passed = openprimer$passed,
+    specificity = specificity,
+    openprimer = openprimer,
+    rejection_reason = openprimer$rejection_reason
+  )
 }
 
 design_homology_arms <- function(
@@ -978,7 +2511,10 @@ design_homology_arms <- function(
   feature,
   selected,
   design_class,
-  target_dir
+  target_dir,
+  trace = new_primer_qc_trace(),
+  log_path = NULL,
+  n20_attempt = 1L
 ) {
   interval <- cut_interval(feature, design_class, length(input$genome))
   parameters <- input$parameters
@@ -1001,7 +2537,11 @@ design_homology_arms <- function(
     stop("primer3_core не найден", call. = FALSE)
   }
 
-  for (attempt in seq_len(1000)) {
+  max_length_attempts <- max(
+    left_limits[["max"]] - left_limits[["opt"]],
+    right_limits[["max"]] - right_limits[["opt"]]
+  ) + 1L
+  for (attempt in seq_len(max_length_attempts)) {
     left_length <- min(
       left_limits[["opt"]] + attempt - 1L,
       left_limits[["max"]]
@@ -1083,7 +2623,7 @@ design_homology_arms <- function(
         right_end = right_end
       )
       positions <- add_genome_positions(left, right, arm, feature$strand == "+")
-      pair <- choose_pair(
+      combinations <- structural_pair_candidates(
         positions,
         feature$strand == "+",
         feature,
@@ -1091,20 +2631,288 @@ design_homology_arms <- function(
         minimum_n20_distance,
         restrict_frame_shift
       )
-      if (!is.null(pair)) {
-        pair_arm_lengths <- pair$PRIMER_RIGHT_pos -
-          pair$PRIMER_LEFT_pos +
-          1L
-        valid_arm_lengths <- pair_arm_lengths[[1]] >= left_limits[["min"]] &&
-          pair_arm_lengths[[1]] <= left_limits[["max"]] &&
-          pair_arm_lengths[[2]] >= right_limits[["min"]] &&
-          pair_arm_lengths[[2]] <= right_limits[["max"]]
-        ticks <- sort(unlist(pair[, c("genome_start", "genome_end")]))
-        if (
-          valid_arm_lengths &&
-            ticks[[2]] >= feature$start &&
-            ticks[[3]] <= feature$end
-        ) {
+      ranking_rows <- list()
+      if (nrow(combinations)) {
+        combinations$bridge_mod <- combinations$deleted_nt %% 3L
+        combinations$structure_passed <- vapply(
+          seq_len(nrow(combinations)),
+          function(i) {
+            combination <- combinations[i, , drop = FALSE]
+            pair <- bind_rows(
+              positions$left[combination$left_index[[1]], , drop = FALSE],
+              positions$right[combination$right_index[[1]], , drop = FALSE]
+            )
+            pair_arm_lengths <- pair$PRIMER_RIGHT_pos -
+              pair$PRIMER_LEFT_pos +
+              1L
+            ticks <- sort(unlist(pair[, c("genome_start", "genome_end")]))
+            pair_arm_lengths[[1]] >= left_limits[["min"]] &&
+              pair_arm_lengths[[1]] <= left_limits[["max"]] &&
+              pair_arm_lengths[[2]] >= right_limits[["min"]] &&
+              pair_arm_lengths[[2]] <= right_limits[["max"]] &&
+              ticks[[2]] >= feature$start &&
+              ticks[[3]] <= feature$end
+          },
+          logical(1)
+        )
+        reaction_results <- new.env(parent = emptyenv())
+        evaluate_physical_pair <- function(side, primer_index, bridge_mod) {
+          key <- paste(side, primer_index, bridge_mod, sep = ":")
+          if (exists(key, reaction_results, inherits = FALSE)) {
+            return(invisible(NULL))
+          }
+          primer_row <- positions[[side]][primer_index, , drop = FALSE]
+          bridge <- "ATGACTGCCCGCAAG"
+          if (design_class == "cds") {
+            bridge <- substr(bridge, 1L, 15L - bridge_mod)
+          }
+          bridge_rc <- as.character(reverseComplement(DNAString(bridge)))
+          reaction <- if (side == "left") "LF_LR" else "RF_RR"
+          physical_pair_id <- sprintf(
+            "n20_%03d_attempt_%03d_%s_%02d_B%d",
+            n20_attempt,
+            attempt,
+            reaction,
+            primer_index,
+            bridge_mod
+          )
+          if (!is.null(log_path)) {
+            append_design_log(
+              log_path,
+              "primer_qc",
+              "TRY",
+              sprintf("pair_id=%s;reaction=%s", physical_pair_id, reaction)
+            )
+          }
+          result <- if (side == "left") {
+            evaluate_candidate_reaction(
+              input,
+              primer_row,
+              paste0("AGCGTCAACT", primer_row$PRIMER_LEFT_SEQUENCE[[1]]),
+              paste0(bridge_rc, primer_row$PRIMER_RIGHT_SEQUENCE[[1]]),
+              reaction,
+              physical_pair_id,
+              trace
+            )
+          } else {
+            evaluate_candidate_reaction(
+              input,
+              primer_row,
+              paste0(bridge, primer_row$PRIMER_LEFT_SEQUENCE[[1]]),
+              paste0("ACGCTGCAG", primer_row$PRIMER_RIGHT_SEQUENCE[[1]]),
+              reaction,
+              physical_pair_id,
+              trace
+            )
+          }
+          assign(
+            key,
+            list(result = result, pair_id = physical_pair_id),
+            reaction_results
+          )
+          invisible(NULL)
+        }
+        eligible <- combinations[combinations$structure_passed, , drop = FALSE]
+        if (nrow(eligible)) {
+          left_physical <- unique(eligible[, c("left_index", "bridge_mod")])
+          right_physical <- unique(eligible[, c("right_index", "bridge_mod")])
+          for (i in seq_len(nrow(left_physical))) {
+            evaluate_physical_pair(
+              "left",
+              left_physical$left_index[[i]],
+              left_physical$bridge_mod[[i]]
+            )
+          }
+          for (i in seq_len(nrow(right_physical))) {
+            evaluate_physical_pair(
+              "right",
+              right_physical$right_index[[i]],
+              right_physical$bridge_mod[[i]]
+            )
+          }
+        }
+        for (combination_index in seq_len(nrow(combinations))) {
+          combination <- combinations[combination_index, , drop = FALSE]
+          left_row <- positions$left[
+            combination$left_index[[1]],
+            ,
+            drop = FALSE
+          ]
+          right_row <- positions$right[
+            combination$right_index[[1]],
+            ,
+            drop = FALSE
+          ]
+          pair <- bind_rows(left_row, right_row)
+          structure_passed <- combinations$structure_passed[[combination_index]]
+          pair_id <- sprintf(
+            "n20_%03d_attempt_%03d_L%02d_R%02d",
+            n20_attempt,
+            attempt,
+            combination$left_index[[1]],
+            combination$right_index[[1]]
+          )
+          left_result <- NULL
+          right_result <- NULL
+          left_pair_id <- NA_character_
+          right_pair_id <- NA_character_
+          rejection_reason <- ""
+          if (structure_passed) {
+            bridge_mod <- combination$bridge_mod[[1]]
+            left_evaluation <- get(
+              paste("left", combination$left_index[[1]], bridge_mod, sep = ":"),
+              reaction_results,
+              inherits = FALSE
+            )
+            right_evaluation <- get(
+              paste("right", combination$right_index[[1]], bridge_mod, sep = ":"),
+              reaction_results,
+              inherits = FALSE
+            )
+            left_result <- left_evaluation$result
+            right_result <- right_evaluation$result
+            left_pair_id <- left_evaluation$pair_id
+            right_pair_id <- right_evaluation$pair_id
+            rejection_reason <- paste(
+              c(
+                if (!left_result$passed) {
+                  paste0("LF_LR:", left_result$rejection_reason)
+                },
+                if (!right_result$passed) {
+                  paste0("RF_RR:", right_result$rejection_reason)
+                }
+              ),
+              collapse = ";"
+            )
+          } else {
+            rejection_reason <- "structural_constraints"
+          }
+          specificity_results <- Filter(
+            Negate(is.null),
+            list(
+              if (!is.null(left_result)) left_result$specificity else NULL,
+              if (!is.null(right_result)) right_result$specificity else NULL
+            )
+          )
+          openprimer_results <- Filter(
+            Negate(is.null),
+            list(
+              if (!is.null(left_result)) left_result$openprimer else NULL,
+              if (!is.null(right_result)) right_result$openprimer else NULL
+            )
+          )
+          primer3_penalties <- suppressWarnings(as.numeric(c(
+            if ("PRIMER_PAIR_PENALTY" %in% names(left_row)) {
+              left_row$PRIMER_PAIR_PENALTY[[1]]
+            } else Inf,
+            if ("PRIMER_PAIR_PENALTY" %in% names(right_row)) {
+              right_row$PRIMER_PAIR_PENALTY[[1]]
+            } else Inf
+          )))
+          ranking_rows[[length(ranking_rows) + 1L]] <- data.frame(
+            pair_id = pair_id,
+            reaction = "homology_arms",
+            primer3_index = (attempt - 1L) * 100L + combination_index,
+            left_primer3_index = combination$left_index[[1]],
+            right_primer3_index = combination$right_index[[1]],
+            left_pair_id = left_pair_id,
+            right_pair_id = right_pair_id,
+            structure_passed = structure_passed,
+            specificity_passed = length(specificity_results) == 2L &&
+              all(vapply(specificity_results, `[[`, logical(1), "passed")),
+            openprimer_passed = length(openprimer_results) == 2L &&
+              all(vapply(openprimer_results, `[[`, logical(1), "passed")),
+            n_high_risk_offtarget_products = sum(vapply(
+              specificity_results,
+              `[[`,
+              numeric(1),
+              "n_high_risk_offtarget_products"
+            )),
+            n_all_offtarget_products = sum(vapply(
+              specificity_results,
+              `[[`,
+              numeric(1),
+              "n_all_offtarget_products"
+            )),
+            n_perfect_3p_offtarget_sites = sum(vapply(
+              specificity_results,
+              `[[`,
+              numeric(1),
+              "n_perfect_3p_offtarget_sites"
+            )),
+            openprimer_failed_soft_constraints = sum(vapply(
+              openprimer_results,
+              `[[`,
+              numeric(1),
+              "failed_soft_constraints"
+            )),
+            openprimer_penalty = sum(vapply(
+              openprimer_results,
+              `[[`,
+              numeric(1),
+              "penalty"
+            )),
+            max_dimer_risk = if (length(openprimer_results)) {
+              max(vapply(
+                openprimer_results,
+                `[[`,
+                numeric(1),
+                "max_dimer_risk"
+              ))
+            } else Inf,
+            abs_tm_diff = if (length(openprimer_results)) {
+              max(vapply(
+                openprimer_results,
+                `[[`,
+                numeric(1),
+                "abs_tm_diff"
+              ))
+            } else Inf,
+            primer3_pair_penalty = sum(primer3_penalties),
+            deleted_nt = combination$deleted_nt[[1]],
+            rejection_reason = rejection_reason,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+      if (length(ranking_rows)) {
+        selection <- select_best_primer_pair(bind_rows(ranking_rows))
+        append_primer_qc_trace(
+          trace,
+          "homology_arms",
+          paste0("n20_", n20_attempt, "_attempt_", attempt),
+          ranking = selection$ranking
+        )
+        if (!is.null(log_path)) {
+          for (i in seq_len(nrow(selection$ranking))) {
+            candidate <- selection$ranking[i, , drop = FALSE]
+            append_design_log(
+              log_path,
+              "primer_qc",
+              if (candidate$selected[[1]]) "OK" else "REJECTED",
+              sprintf(
+                "pair_id=%s;reason=%s",
+                candidate$pair_id[[1]],
+                candidate$rejection_reason[[1]]
+              )
+            )
+          }
+        }
+        if (!is.null(selection$pair)) {
+          selected_rank <- selection$pair
+          pair <- bind_rows(
+            positions$left[
+              selected_rank$left_primer3_index[[1]],
+              ,
+              drop = FALSE
+            ],
+            positions$right[
+              selected_rank$right_primer3_index[[1]],
+              ,
+              drop = FALSE
+            ]
+          )
+          ticks <- sort(unlist(pair[, c("genome_start", "genome_end")]))
           write_tsv(
             bind_rows(positions$left, positions$right),
             file.path(target_dir, "primer3_table.tsv")
@@ -1114,7 +2922,9 @@ design_homology_arms <- function(
             left = left_seq,
             right = right_seq,
             arm = arm,
-            ticks = ticks
+            ticks = ticks,
+            selected_pair_id = selected_rank$pair_id[[1]],
+            primer_qc_trace = trace
           ))
         }
       }
@@ -1268,7 +3078,8 @@ write_design_outputs <- function(
   selected,
   arms,
   design_class,
-  target_dir
+  target_dir,
+  log_path = NULL
 ) {
   pair <- arms$pair
   gap <- arms$ticks[[3]] - arms$ticks[[2]] - 1L
@@ -1360,6 +3171,89 @@ write_design_outputs <- function(
     genome_end = PRIMER_RIGHT_pos + screening_range[[1]] - 1L
   )
   write_tsv(screening, file.path(target_dir, "screening_primer3_table.tsv"))
+  screening_ranking <- list()
+  for (screening_index in seq_len(nrow(screening))) {
+    screening_row <- screening[screening_index, , drop = FALSE]
+    pair_id <- sprintf("screening_%02d", screening_index)
+    if (!is.null(log_path)) {
+      append_design_log(
+        log_path,
+        "primer_qc",
+        "TRY",
+        sprintf("pair_id=%s;reaction=scrF_scrR", pair_id)
+      )
+    }
+    result <- evaluate_candidate_reaction(
+      input,
+      screening_row,
+      screening_row$PRIMER_LEFT_SEQUENCE[[1]],
+      screening_row$PRIMER_RIGHT_SEQUENCE[[1]],
+      "scrF_scrR",
+      pair_id,
+      arms$primer_qc_trace
+    )
+    specificity <- result$specificity
+    openprimer <- result$openprimer
+    primer3_penalty <- if ("PRIMER_PAIR_PENALTY" %in% names(screening_row)) {
+      suppressWarnings(as.numeric(screening_row$PRIMER_PAIR_PENALTY[[1]]))
+    } else Inf
+    screening_ranking[[length(screening_ranking) + 1L]] <- data.frame(
+      pair_id = pair_id,
+      reaction = "scrF_scrR",
+      primer3_index = screening_index,
+      structure_passed = TRUE,
+      specificity_passed = specificity$passed,
+      openprimer_passed = !is.null(openprimer) && openprimer$passed,
+      n_high_risk_offtarget_products =
+        specificity$n_high_risk_offtarget_products,
+      n_all_offtarget_products = specificity$n_all_offtarget_products,
+      n_perfect_3p_offtarget_sites =
+        specificity$n_perfect_3p_offtarget_sites,
+      openprimer_failed_soft_constraints = if (is.null(openprimer)) {
+        0L
+      } else openprimer$failed_soft_constraints,
+      openprimer_penalty = if (is.null(openprimer)) Inf else openprimer$penalty,
+      max_dimer_risk = if (is.null(openprimer)) Inf else {
+        openprimer$max_dimer_risk
+      },
+      abs_tm_diff = if (is.null(openprimer)) Inf else openprimer$abs_tm_diff,
+      primer3_pair_penalty = primer3_penalty,
+      deleted_nt = gap,
+      rejection_reason = result$rejection_reason,
+      stringsAsFactors = FALSE
+    )
+  }
+  screening_selection <- select_best_primer_pair(bind_rows(screening_ranking))
+  append_primer_qc_trace(
+    arms$primer_qc_trace,
+    "scrF_scrR",
+    "screening_candidates",
+    ranking = screening_selection$ranking
+  )
+  if (!is.null(log_path)) {
+    for (i in seq_len(nrow(screening_selection$ranking))) {
+      candidate <- screening_selection$ranking[i, , drop = FALSE]
+      append_design_log(
+        log_path,
+        "primer_qc",
+        if (candidate$selected[[1]]) "OK" else "REJECTED",
+        sprintf(
+          "pair_id=%s;reason=%s",
+          candidate$pair_id[[1]],
+          candidate$rejection_reason[[1]]
+        )
+      )
+    }
+  }
+  if (is.null(screening_selection$pair)) {
+    stop("Все screening-пары отклонены primer QC", call. = FALSE)
+  }
+  screening <- screening[
+    screening_selection$pair$primer3_index[[1]],
+    ,
+    drop = FALSE
+  ]
+  selected_screening_pair_id <- screening_selection$pair$pair_id[[1]]
   screening_primers <- DNAStringSet(c(
     screening$PRIMER_LEFT_SEQUENCE[[1]],
     screening$PRIMER_RIGHT_SEQUENCE[[1]]
@@ -1426,6 +3320,18 @@ write_design_outputs <- function(
     ),
     stringsAsFactors = FALSE
   )
+  selected_ranking <- bind_rows(arms$primer_qc_trace$ranking)
+  selected_ranking <- selected_ranking[selected_ranking$selected, , drop = FALSE]
+  homology_rank <- selected_ranking[
+    selected_ranking$pair_id == arms$selected_pair_id,
+    ,
+    drop = FALSE
+  ]
+  screening_rank <- selected_ranking[
+    selected_ranking$pair_id == selected_screening_pair_id,
+    ,
+    drop = FALSE
+  ]
 
   writeLines(
     c(
@@ -1490,6 +3396,28 @@ write_design_outputs <- function(
         "screening_successful_insertion_bp",
         screening_product_sizes[["successful_insertion_bp"]],
         sep = "\t"
+      ),
+      paste("homology_pair_id", arms$selected_pair_id, sep = "\t"),
+      paste("screening_pair_id", selected_screening_pair_id, sep = "\t"),
+      paste(
+        "primer_qc_homology_offtarget_products",
+        homology_rank$n_all_offtarget_products[[1]],
+        sep = "\t"
+      ),
+      paste(
+        "primer_qc_screening_offtarget_products",
+        screening_rank$n_all_offtarget_products[[1]],
+        sep = "\t"
+      ),
+      paste(
+        "primer_qc_homology_openprimer_penalty",
+        homology_rank$openprimer_penalty[[1]],
+        sep = "\t"
+      ),
+      paste(
+        "primer_qc_screening_openprimer_penalty",
+        screening_rank$openprimer_penalty[[1]],
+        sep = "\t"
       )
     ),
     file.path(target_dir, "report.tsv")
@@ -1503,62 +3431,11 @@ write_design_outputs <- function(
       sequence_purposes = sequence_purposes,
       primer_metrics = primer_metrics,
       screening_product_sizes = screening_product_sizes
-    )
+    ),
+    primer_qc_trace = arms$primer_qc_trace,
+    homology_pair_id = arms$selected_pair_id,
+    screening_pair_id = selected_screening_pair_id
   )
-}
-
-run_virtual_pcr <- function(input, target_dir, primer_paths) {
-  if (!file.exists(input$tools$virtual_pcr_jar)) {
-    stop("virtualPCR JAR не найден", call. = FALSE)
-  }
-  check <- function(label, targets_path, primers_path, output_name) {
-    config <- file.path(target_dir, paste0("virtual_pcr_", label, ".conf"))
-    writeLines(
-      c(
-        paste0("targets_path=", targets_path),
-        paste0("output_path=", file.path(target_dir, output_name)),
-        paste0("primers_path=", primers_path),
-        "type=primer",
-        "ShowPCRProducts=true",
-        "ShowPrimerAlignment=true",
-        "ShowPrimerAlignmentPCRproduct=false",
-        "primerstatistic=true"
-      ),
-      config
-    )
-    run_tool(
-      "java",
-      c("-jar", input$tools$virtual_pcr_jar, config),
-      stdout = file.path(
-        target_dir,
-        paste0("virtual_pcr_", label, ".stdout.log")
-      ),
-      stderr = file.path(
-        target_dir,
-        paste0("virtual_pcr_", label, ".stderr.log")
-      )
-    )
-    unlink(config)
-  }
-  check(
-    "genome",
-    input$genome_path,
-    primer_paths$all_primers_path,
-    "genome_offtarget_check.txt"
-  )
-  check(
-    "genome_non_service",
-    input$genome_path,
-    primer_paths$plain_path,
-    "genome_offtarget_non_service_seq.txt"
-  )
-  check(
-    "target_plasmid_screening",
-    input$target_plasmid,
-    primer_paths$screening_path,
-    "screening_offtarget_check.txt"
-  )
-  invisible(TRUE)
 }
 
 append_design_log <- function(log_path, stage, status, detail = "") {
@@ -1606,6 +3483,7 @@ design_from_grna_pool <- function(
   log_path
 ) {
   attempted_ranges <- new.env(parent = emptyenv())
+  primer_qc_trace <- new_primer_qc_trace()
   attempts <- 0L
   last_failure_stage <- "homology_arms"
   result <- visit_grna_sets(
@@ -1635,10 +3513,17 @@ design_from_grna_pool <- function(
         feature,
         selected,
         design_class,
-        target_dir
+        target_dir,
+        primer_qc_trace,
+        log_path,
+        attempts
       )
       if (is.null(arms)) {
-        last_failure_stage <<- "homology_arms"
+        last_failure_stage <<- if (length(primer_qc_trace$ranking)) {
+          "primer_qc"
+        } else {
+          "homology_arms"
+        }
         append_design_log(
           log_path,
           "homology_arms",
@@ -1662,13 +3547,22 @@ design_from_grna_pool <- function(
             selected,
             arms,
             design_class,
-            target_dir
+            target_dir,
+            log_path
           )
         ),
         error = function(e) list(ok = FALSE, error = e)
       )
       if (!output_attempt$ok) {
-        last_failure_stage <<- "design_outputs"
+        last_failure_stage <<- if (grepl(
+          "primer QC|openPrimeR|constraint|specificity",
+          conditionMessage(output_attempt$error),
+          ignore.case = TRUE
+        )) {
+          "primer_qc"
+        } else {
+          "design_outputs"
+        }
         append_design_log(
           log_path,
           "design_outputs",
@@ -1687,6 +3581,7 @@ design_from_grna_pool <- function(
         "OK",
         sprintf("set=%d", attempts)
       )
+      write_primer_qc_trace(primer_qc_trace, target_dir)
       list(
         selected = selected,
         arms = arms,
@@ -1696,6 +3591,7 @@ design_from_grna_pool <- function(
     }
   )
   if (is.null(result)) {
+    write_primer_qc_trace(primer_qc_trace, target_dir)
     reason <- sprintf(
       paste(
         "Не удалось завершить дизайн ни для одного допустимого набора N20",
@@ -1825,11 +3721,6 @@ design_target <- function(input, genome_name, gene_name, design_class) {
         write_selected_grnas(design$selected, feature, target_dir)
       )
       run_design_stage(
-        "virtual_pcr",
-        log_path,
-        run_virtual_pcr(input, target_dir, design$primer_paths)
-      )
-      run_design_stage(
         "wet_lab_output",
         log_path,
         write_wet_lab_outputs(
@@ -1885,7 +3776,16 @@ design_target <- function(input, genome_name, gene_name, design_class) {
 
 main <- function(args = commandArgs(trailingOnly = TRUE)) {
   cli <- parse_designer_args(args)
+  configure_openprimer_environment()
   input <- make_design_input(cli)
+  assign(
+    ".openprimer_settings",
+    load_openprimer_settings(
+      input$parameters$primer_qc,
+      input$parameters$primer3_buffer
+    ),
+    input$primer_qc_cache
+  )
   dir.create(input$output_dir, recursive = TRUE, showWarnings = FALSE)
   layout <- output_layout(input$output_dir)
   dir.create(layout$wet_lab, recursive = TRUE, showWarnings = FALSE)

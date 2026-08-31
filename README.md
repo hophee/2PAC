@@ -1,13 +1,31 @@
 # 2PAC
 
-2PAC designs CRISPR-Cas9 N20 sequences, homology-arm primers, screening
+2PAC designs CRISPR-Cas9 N20 oligos, homology-arm PCR primers, screening
 primers, and an edited-genome model for bacterial CDS and ncRNA targets.
+
+Primer selection is candidate-based: Primer3 proposes up to ten pairs per
+homology arm and five screening pairs, then 2PAC applies structural rules,
+exhaustive Biostrings specificity, mandatory openPrimeR QC, and a stable
+lexicographic ranking. A rejected first Primer3 row no longer rejects the
+target. If all rows fail, 2PAC continues with the next admissible N20 set.
 
 ## Installation
 
-Run `./install.sh` to install the external tools and create the `oligo_design`
-Conda environment. 
-The required R packages are `argparser`, `dplyr`, `readr`, `Biostrings`, `ape`, and `janitor`.
+The environment is split to preserve the legacy Python 2 CHOPCHOP stack:
+
+- `env.yml`: R, Bioconductor, openPrimeR, Primer3, Bowtie, OligoArrayAux,
+  rmelting, MAFFT, and the remaining command-line tools;
+- `env_chopchop.yml`: CHOPCHOP and its Python 2 dependencies;
+- `env_viennarna.yml`: ViennaRNA, exposed to the main environment by a small
+  launcher created by `install.sh`.
+
+Run `./install.sh` for a complete installation. On machines with little free
+disk space, create the three environments manually from those YAML files and
+run only the verification section of `install.sh`. The pipeline fails closed
+when a required openPrimeR constraint or executable is unavailable.
+
+Java remains required by the `rmelting` JAR behind `tools/melting-batch`; it is
+not used for virtualPCR. virtualPCR itself is no longer installed or invoked.
 
 ## Usage
 
@@ -17,71 +35,93 @@ Rscript oligo_designer.R \
   --genome-annotation genome.gff \
   --annotation-format gff \
   --target-plasmid pTarget.fasta \
+  --cas-plasmid pCas.fasta \
   --output-dir results \
   --cds gene1,gene2 \
   --ncrna rna1,rna2
 ```
 
-Targets are first matched by `locus_tag`, then by `gene`. `--cds` and
-`--ncrna` accept comma-separated or space-separated values. Bakta TSV and
-GFF/GFF3 annotations are supported.
+Targets are matched first by `locus_tag`, then by `gene`. `--cds` and
+`--ncrna` accept comma- or space-separated values. Bakta TSV and GFF/GFF3
+annotations are supported. The current implementation supports one complete
+linear genome contig; every FASTA record in pTarget and pCas is treated as a
+separate circular reference.
 
 ### Design parameters
 
 | Argument | Default | Meaning |
 |---|---:|---|
-| `--n20-mn` | `1` | Number of N20 sequences required in the final set |
-| `--n20-strands` | `random` | For sets larger than one: `plus`, `minus`, `both`, or `random` |
-| `--n20-offtarget` | `0` | Maximum values for `MM0,MM1,...`, separated by commas |
-| `--cds-fs` | `FALSE` | Require the deleted CDS length to be divisible by three |
-| `--ncrna-fs` | `FALSE` | Require the deleted ncRNA length to be divisible by three |
-| `--left-arm-min/opt/max` | `300/350/400` | Hard minimum, preferred initial, and hard maximum left-arm lengths |
-| `--right-arm-min/opt/max` | `400/450/500` | Hard minimum, preferred initial, and hard maximum right-arm lengths |
-| `--n20-arm-min-distance` | `40` | Minimum number of bases between every selected N20 and each homology arm |
+| `--n20-mn` | `1` | Required N20 count |
+| `--n20-strands` | `random` | `plus`, `minus`, `both`, or unconstrained `random` |
+| `--n20-offtarget` | `0` | Maximum CHOPCHOP `MM0,MM1,...` values |
+| `--cds-fs`, `--ncrna-fs` | off | Require deleted length divisible by three |
+| `--left-arm-min/opt/max` | `300/350/400` | Left-arm structural limits |
+| `--right-arm-min/opt/max` | `400/450/500` | Right-arm structural limits |
+| `--n20-arm-min-distance` | `40` | Minimum N20-to-arm distance in nt |
+| `--primer-max-mismatches` | `2` | Maximum mismatches per binding site |
+| `--primer-critical-3p-bases` | `5` | Critical primer 3′ region |
+| `--primer-max-3p-mismatches` | `0` | Allowed mismatches in that region |
+| `--primer-min-product-size` | `50` | Minimum counted amplicon size |
+| `--primer-max-product-size` | `2000` | Maximum counted amplicon size |
+| `--primer-max-offtarget-products` | `0` | Allowed non-intended amplicons |
 
-`random` means that either strand composition is accepted; candidates remain
-ranked deterministically. The number of `--n20-offtarget` values must not
-exceed the number of `MM*` columns emitted by CHOPCHOP. A candidate is retained
-only when every supplied threshold is met.
+The legacy Primer3 generation thresholds remain unchanged: primer length
+`18/21/27` nt (min/opt/max), homopolymer maximum `5`, and pair Tm difference
+maximum `8 °C`. Candidates outside the stricter openPrimeR profile are retained
+in the trace and rejected at its explicit hard gate. Primer3 buffer defaults
+remain 50 mM monovalent salt, 1.5 mM Mg, 0.6 mM dNTP, and 50 nM DNA.
+`run_parameters.tsv` records these values, the active constraints, their
+effective limits, package versions, and tool paths.
+
+## Selection policy
+
+Candidates pass four non-compensating levels:
+
+1. Existing arm geometry, feature bounds, N20 distance, frame, and deletion
+   rules.
+2. An explicitly identified expected product and no forbidden off-target
+   products across genome, pTarget, and pCas. Exhaustive binding-site pairing
+   is authoritative; `matchProbePair()` is retained as a comparison generator.
+3. Mandatory openPrimeR constraints. Annealing sequence is used for length,
+   GC, Tm, efficiency/coverage; the ordered full oligo is used for self/cross
+   dimers and secondary structure. Only primers in one physical PCR reaction
+   are evaluated together.
+4. Deterministic lexicographic ranking by off-target risk, soft failures,
+   openPrimeR penalty, dimer risk, Tm difference, Primer3 penalty, deleted
+   nucleotides, and original Primer3 order.
+
+No soft score can compensate for a failed hard gate.
 
 ## Output
 
-The output root is split by audience:
-
 ```text
 results/
-├── WetLab/
-│   └── <target>_results/
-│       ├── final_sequences.fasta
-│       ├── final_sequences.txt
-│       └── wet_lab_report.txt
+├── WetLab/<target>_results/
+│   ├── final_sequences.fasta
+│   ├── final_sequences.txt
+│   └── wet_lab_report.txt
 └── TechReport/
     ├── design_summary.tsv
     ├── run_parameters.tsv
     └── <target>_results/
-        └── ... pipeline outputs, tool reports, and logs
+        ├── primer_binding_sites.tsv
+        ├── primer_amplicons.tsv
+        ├── primer_openprimer_qc.tsv
+        ├── primer_pair_ranking.tsv
+        ├── report.tsv
+        └── design.log
 ```
 
-`final_sequences.fasta` and `final_sequences.txt` contain the same complete
-oligonucleotide set: forward N20 oligos, the common reverse sgRNA oligo, four
-homology-arm primers, and two screening primers. `wet_lab_report.txt` lists
-the annealing-region Tm values and the expected screening PCR product sizes
-for the unedited (unsuccessful insertion) and edited (successful insertion)
-alleles. A target-specific WetLab directory is written only after all design
-and virtualPCR stages succeed.
+The four primer QC tables preserve every evaluated binding site, amplicon,
+openPrimeR metric/`EVAL_*` result, gate, rank component, selection flag, and
+rejection reason. `design.log` records `primer_qc TRY`, `REJECTED`, and `OK`.
+WetLab output is created only after homology and screening pairs pass all
+gates. Failed targets keep their technical trace and `error.txt`; other targets
+continue.
 
-`TechReport/` contains everything needed for traceability: CHOPCHOP, Primer3,
-and virtualPCR products, the edited-genome model, intermediate FASTA/TSV
-files, genome indexes, a CHOPCHOP configuration snapshot, `report.tsv`, and
-`design.log`. `run_parameters.tsv` records input file paths, target lists, N20
-and homology-arm settings, external tool paths, and the Primer3 buffer
-concentrations used for Tm calculation (50 mM monovalent salt, 1.5 mM
-divalent salt, 0.6 mM dNTP, and 50 nM DNA).
+Run tests with:
 
-If a target fails, its `TechReport/<target>_results/` directory also contains
-`error.txt` with the gene, design class, failed stage, and reason. Other
-targets continue to run and the failure is recorded in
-`TechReport/design_summary.tsv`; no new WetLab result is created for that
-failed target.
-
-The implementation still supports one complete linear genome contig only.
+```bash
+conda run -n oligo_design Rscript test/test_unit.R
+bash test/test_run.sh
+```
