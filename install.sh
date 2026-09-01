@@ -235,6 +235,7 @@ print(result)
 RSCRIPT
 
   PKG_SYSREQS=false \
+  USE_BUNDLED_LIBUV=1 \
   conda run \
     --no-capture-output \
     --name "$CONDA_ENV_NAME" \
