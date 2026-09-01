@@ -13,19 +13,19 @@ target. If all rows fail, 2PAC continues with the next admissible N20 set.
 
 The environment is split to preserve the legacy Python 2 CHOPCHOP stack:
 
-- `env.yml`: R, Bioconductor, openPrimeR, Primer3, Bowtie, OligoArrayAux,
-  rmelting, MAFFT, and the remaining command-line tools;
+- `env.yml`: R, pak, compilers, Bowtie, OligoArrayAux, MAFFT, and the remaining
+  command-line tools;
 - `env_chopchop.yml`: CHOPCHOP and its Python 2 dependencies;
 - `env_viennarna.yml`: ViennaRNA, exposed to the main environment by a small
   launcher created by `install.sh`.
 
-Run `./install.sh` for a complete installation. On machines with little free
-disk space, create the three environments manually from those YAML files and
-run only the verification section of `install.sh`. The pipeline fails closed
-when a required openPrimeR constraint or executable is unavailable.
+Run `./install.sh` for a complete installation. The installer uses
+`pak::pkg_install()` for CRAN/Bioconductor dependencies and explicitly targets
+R's `.Library` inside `oligo_design`; it does not install them into a user
+library. The pipeline fails closed when a required openPrimeR constraint or
+executable is unavailable.
 
-Java remains required by the `rmelting` JAR behind `tools/melting-batch`; it is
-not used for virtualPCR. virtualPCR itself is no longer installed or invoked.
+Java remains required by the `rmelting` JAR behind `tools/melting-batch`.
 
 ## Usage
 
@@ -115,6 +115,10 @@ results/
 The four primer QC tables preserve every evaluated binding site, amplicon,
 openPrimeR metric/`EVAL_*` result, gate, rank component, selection flag, and
 rejection reason. `design.log` records `primer_qc TRY`, `REJECTED`, and `OK`.
+For every successful target, `wet_lab_report.txt` contains the complete final
+sequence set, primer Tm values, expected screening products for edited and
+unedited alleles, per-N20 distances to both homology arms, screening off-target
+counts, and selected openPrimeR quality metrics with readable labels.
 WetLab output is created only after homology and screening pairs pass all
 gates. Failed targets keep their technical trace and `error.txt`; other targets
 continue.
@@ -125,3 +129,18 @@ Run tests with:
 conda run -n oligo_design Rscript test/test_unit.R
 bash test/test_run.sh
 ```
+
+### Strict-QC integration baseline
+
+The MG1655 fixture deliberately limits arms to `350/450` nt. Its effective
+high-stringency limits are: primer length `18..22`, GC ratio `0.4..0.6`, GC
+clamp `1..3`, runs and repeats `0..4`, Tm `55..65 °C`, pair ΔTm `0..5 °C`,
+self-dimer ΔG `>= -5`, cross-dimer ΔG `>= -7`, secondary-structure ΔG
+`>= -1`, and primer efficiency `>= 0.001`.
+
+With this fixture, `recA` and `hupB` currently exhaust structural homology-arm
+candidates before openPrimeR; `pta` reaches `primer_qc` but has no pair passing
+all hard gates. These are explicit strict-QC baseline outcomes, not successful
+primer designs. `test_screening_fixture.R` independently verifies the complete
+successful `scrF/scrR` path, including rejection of Primer3 row 1 and selection
+of row 2.
