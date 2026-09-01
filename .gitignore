@@ -13,6 +13,7 @@
 /test/*
 !/test/test_run.sh
 !/test/test_unit.R
+!/test/test_screening_fixture.R
 
 # Local technical specifications and dated archives
 /TECHNICAL_SPECIFICATION.md

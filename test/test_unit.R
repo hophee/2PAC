@@ -531,6 +531,60 @@ assert_true(
   "Screening PCR sizes do not reflect the edited-genome length change"
 )
 
+n20_distances <- calculate_n20_arm_distances(
+  data.frame(
+    target_sequence = c("ACGTACGTACGTACGTACGTAGG", "TGCATGCATGCATGCATGCAAGG"),
+    strand = c("+", "-"),
+    n20_start = c(141L, 161L),
+    n20_end = c(160L, 180L),
+    stringsAsFactors = FALSE
+  ),
+  c(50L, 100L, 221L, 270L),
+  "+"
+)
+assert_true(
+  identical(n20_distances$left_arm_distance_bp, c(40L, 60L)) &&
+    identical(n20_distances$right_arm_distance_bp, c(60L, 40L)),
+  "Per-N20 distances to homology arms are incorrect"
+)
+minus_n20_distances <- calculate_n20_arm_distances(
+  data.frame(
+    target_sequence = "ACGTACGTACGTACGTACGTAGG",
+    strand = "-",
+    n20_start = 141L,
+    n20_end = 160L,
+    stringsAsFactors = FALSE
+  ),
+  c(50L, 100L, 221L, 270L),
+  "-"
+)
+assert_true(
+  minus_n20_distances$left_arm_distance_bp[[1]] == 60L &&
+    minus_n20_distances$right_arm_distance_bp[[1]] == 40L,
+  "Minus-strand arm labels were not oriented to the target"
+)
+
+openprimer_report_metrics <- format_openprimer_report_metrics(data.frame(
+  constraints_passed = TRUE,
+  gc_ratio_fw = 0.5,
+  Tm_C_fw = 62.3456,
+  Cross_Dimer_DeltaG = -1.25,
+  EVAL_gc_ratio = TRUE,
+  penalty = 1.5,
+  stringsAsFactors = FALSE
+))
+assert_true(
+  any(
+    openprimer_report_metrics$metric == "GC-состав forward-праймера, %" &
+      openprimer_report_metrics$value == "50"
+  ) &&
+    any(
+      openprimer_report_metrics$metric == "Проверка GC-состава" &
+        openprimer_report_metrics$value == "пройдено"
+    ),
+  "openPrimeR metrics were not formatted with readable names and values"
+)
+
 wet_lab_dir <- tempfile("2pac-wet-lab-")
 wet_lab_sequences <- DNAStringSet(c(
   geneA_LF = "ACGTACGT",
@@ -549,7 +603,15 @@ write_wet_lab_outputs(
     tm_c = c(61.2, 63.4),
     stringsAsFactors = FALSE
   ),
-  screening_sizes
+  screening_sizes,
+  n20_distances,
+  list(
+    pair_id = "screening_02",
+    offtarget_products = 0L,
+    high_risk_offtarget_products = 0L,
+    perfect_3p_offtarget_sites = 0L,
+    openprimer_metrics = openprimer_report_metrics
+  )
 )
 assert_true(
   all(c(
@@ -585,16 +647,25 @@ wet_lab_report <- readLines(
   encoding = "UTF-8"
 )
 assert_true(
-  any(grepl("Неуспешная вставка.*500", wet_lab_report)),
-  "WetLab report lacks the unsuccessful-insertion PCR size"
+  any(grepl("Без успешного нокаута.*500", wet_lab_report)),
+  "WetLab report lacks the unsuccessful-knockout PCR size"
 )
 assert_true(
-  any(grepl("Успешная вставка.*350", wet_lab_report)),
-  "WetLab report lacks the successful-insertion PCR size"
+  any(grepl("С успешным нокаутом.*350", wet_lab_report)),
+  "WetLab report lacks the successful-knockout PCR size"
 )
 assert_true(
   any(grepl("geneA_LF.*61.2", wet_lab_report)),
   "WetLab report lacks a primer annealing temperature"
+)
+assert_true(
+  any(grepl("N20_1.*40.*60", wet_lab_report)),
+  "WetLab report lacks per-N20 distances to both homology arms"
+)
+assert_true(
+  any(grepl("Оффтаргетные ПЦР-продукты, всего.*0", wet_lab_report)) &&
+    any(grepl("GC-состав forward-праймера.*50", wet_lab_report)),
+  "WetLab report lacks readable screening primer QC"
 )
 
 error_root <- tempfile("2pac-error-")

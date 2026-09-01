@@ -2979,6 +2979,115 @@ calculate_screening_product_sizes <- function(
   )
 }
 
+calculate_n20_arm_distances <- function(selected, arm_ticks, target_strand) {
+  required <- c("target_sequence", "strand", "n20_start", "n20_end")
+  if (
+    !all(required %in% names(selected)) ||
+      length(arm_ticks) != 4L ||
+      !target_strand %in% c("+", "-")
+  ) {
+    stop("Не удалось рассчитать расстояния N20 до плеч гомологии", call. = FALSE)
+  }
+  left_boundary <- sort(arm_ticks)[[2]]
+  right_boundary <- sort(arm_ticks)[[3]]
+  genomic_left <- selected$n20_start - left_boundary - 1L
+  genomic_right <- right_boundary - selected$n20_end - 1L
+  distances <- data.frame(
+    name = paste0("N20_", seq_len(nrow(selected))),
+    sequence = substr(selected$target_sequence, 1L, 20L),
+    strand = selected$strand,
+    genomic_coordinates = paste0(selected$n20_start, "-", selected$n20_end),
+    left_arm_distance_bp = if (target_strand == "+") {
+      genomic_left
+    } else genomic_right,
+    right_arm_distance_bp = if (target_strand == "+") {
+      genomic_right
+    } else genomic_left,
+    stringsAsFactors = FALSE
+  )
+  if (!nrow(distances) || anyNA(distances) || any(
+    distances$left_arm_distance_bp < 0L |
+      distances$right_arm_distance_bp < 0L
+  )) {
+    stop("N20 находится вне промежутка между плечами гомологии", call. = FALSE)
+  }
+  distances
+}
+
+format_openprimer_report_metrics <- function(metrics) {
+  labels <- c(
+    constraints_passed = "Все обязательные ограничения пройдены",
+    primer_length_fw = "Длина forward-праймера, нт",
+    primer_length_rev = "Длина reverse-праймера, нт",
+    gc_ratio_fw = "GC-состав forward-праймера, %",
+    gc_ratio_rev = "GC-состав reverse-праймера, %",
+    gc_clamp_fw = "GC-clamp forward-праймера, нт",
+    gc_clamp_rev = "GC-clamp reverse-праймера, нт",
+    no_runs_fw = "Максимальный гомополимерный участок forward, нт",
+    no_runs_rev = "Максимальный гомополимерный участок reverse, нт",
+    no_repeats_fw = "Максимальное число повторов forward",
+    no_repeats_rev = "Максимальное число повторов reverse",
+    Tm_C_fw = "Tm forward по openPrimeR, °C",
+    Tm_C_rev = "Tm reverse по openPrimeR, °C",
+    melting_temp_diff = "Разница Tm пары, °C",
+    Basic_primer_coverage = "Число покрытых целевых шаблонов",
+    Basic_Coverage_Ratio = "Доля покрытых целевых шаблонов, %",
+    primer_specificity = "Специфичность праймеров, %",
+    primer_efficiency = "Эффективность праймеров",
+    mean_primer_efficiency = "Средняя эффективность праймеров",
+    Self_Dimer_DeltaG = "Худший self-dimer ΔG, ккал/моль",
+    Cross_Dimer_DeltaG = "Худший cross-dimer ΔG, ккал/моль",
+    Structure_deltaG_fw = "Вторичная структура forward ΔG, ккал/моль",
+    Structure_deltaG_rev = "Вторичная структура reverse ΔG, ккал/моль",
+    Structure_deltaG = "Худшая вторичная структура ΔG, ккал/моль",
+    penalty = "Суммарный штраф openPrimeR",
+    EVAL_primer_length = "Проверка длины праймеров",
+    EVAL_gc_ratio = "Проверка GC-состава",
+    EVAL_gc_clamp = "Проверка GC-clamp",
+    EVAL_no_runs = "Проверка гомополимерных участков",
+    EVAL_no_repeats = "Проверка повторов",
+    EVAL_melting_temp_range = "Проверка диапазона Tm",
+    EVAL_melting_temp_diff = "Проверка разницы Tm",
+    EVAL_primer_coverage = "Проверка покрытия шаблона",
+    EVAL_primer_efficiency = "Проверка эффективности праймеров",
+    EVAL_primer_specificity = "Проверка специфичности праймеров",
+    EVAL_self_dimerization = "Проверка self-dimer",
+    EVAL_cross_dimerization = "Проверка cross-dimer",
+    EVAL_secondary_structure = "Проверка вторичной структуры"
+  )
+  present <- intersect(names(labels), names(metrics))
+  if (!length(present)) {
+    stop("Для выбранной screening-пары отсутствуют метрики openPrimeR", call. = FALSE)
+  }
+  percentage_metrics <- c(
+    "gc_ratio_fw", "gc_ratio_rev", "Basic_Coverage_Ratio",
+    "primer_specificity"
+  )
+  format_value <- function(value, metric) {
+    value <- unlist(value, use.names = FALSE)
+    if (is.logical(value)) {
+      return(paste(ifelse(value, "пройдено", "не пройдено"), collapse = ", "))
+    }
+    numeric_value <- suppressWarnings(as.numeric(value))
+    if (metric %in% percentage_metrics && all(!is.na(numeric_value))) {
+      numeric_value <- numeric_value * 100
+    }
+    if (all(!is.na(numeric_value))) {
+      return(paste(format(round(numeric_value, 3), trim = TRUE), collapse = ", "))
+    }
+    paste(gsub("[\r\n\t]+", " ", as.character(value)), collapse = ", ")
+  }
+  data.frame(
+    metric = unname(labels[present]),
+    value = vapply(
+      present,
+      function(metric) format_value(metrics[[metric]], metric),
+      character(1)
+    ),
+    stringsAsFactors = FALSE
+  )
+}
+
 write_wet_lab_outputs <- function(
   wet_lab_dir,
   feature,
@@ -2986,9 +3095,19 @@ write_wet_lab_outputs <- function(
   sequences,
   sequence_purposes,
   primer_metrics,
-  screening_product_sizes
+  screening_product_sizes,
+  n20_distances,
+  screening_qc
 ) {
   required_metrics <- c("name", "purpose", "annealing_sequence", "tm_c")
+  required_distances <- c(
+    "name", "sequence", "strand", "genomic_coordinates",
+    "left_arm_distance_bp", "right_arm_distance_bp"
+  )
+  required_screening_qc <- c(
+    "pair_id", "offtarget_products", "high_risk_offtarget_products",
+    "perfect_3p_offtarget_sites", "openprimer_metrics"
+  )
   if (
     !length(sequences) ||
       length(sequence_purposes) != length(sequences) ||
@@ -2996,6 +3115,9 @@ write_wet_lab_outputs <- function(
       anyNA(names(sequences)) ||
       any(!nzchar(names(sequences))) ||
       !all(required_metrics %in% names(primer_metrics)) ||
+      !all(required_distances %in% names(n20_distances)) ||
+      !all(required_screening_qc %in% names(screening_qc)) ||
+      !all(c("metric", "value") %in% names(screening_qc$openprimer_metrics)) ||
       !all(
         c("unsuccessful_insertion_bp", "successful_insertion_bp") %in%
           names(screening_product_sizes)
@@ -3035,6 +3157,24 @@ write_wet_lab_outputs <- function(
     1L,
     function(row) paste(row, collapse = "\t")
   )
+  n20_table <- n20_distances[, required_distances, drop = FALSE]
+  names(n20_table) <- c(
+    "N20", "Последовательность N20 (5'-3')", "Цепь",
+    "Геномные координаты", "До левого плеча, п.н.",
+    "До правого плеча, п.н."
+  )
+  n20_lines <- apply(
+    n20_table,
+    1L,
+    function(row) paste(row, collapse = "\t")
+  )
+  openprimer_table <- screening_qc$openprimer_metrics
+  names(openprimer_table) <- c("Метрика openPrimeR", "Значение")
+  openprimer_lines <- apply(
+    openprimer_table,
+    1L,
+    function(row) paste(row, collapse = "\t")
+  )
   report <- c(
     "2PAC: отчёт для мокрой лаборатории",
     paste("Цель", feature$query_name, sep = "\t"),
@@ -3054,15 +3194,45 @@ write_wet_lab_outputs <- function(
     "",
     "Размеры скрининговых ПЦР-продуктов",
     paste(
-      "Неуспешная вставка (исходный аллель), п.н.",
+      "Без успешного нокаута (исходный аллель), п.н.",
       screening_product_sizes[["unsuccessful_insertion_bp"]],
       sep = "\t"
     ),
     paste(
-      "Успешная вставка (редактированный аллель), п.н.",
+      "С успешным нокаутом (редактированный аллель), п.н.",
       screening_product_sizes[["successful_insertion_bp"]],
       sep = "\t"
-    )
+    ),
+    "",
+    "Расстояния выбранных N20 до плеч гомологии",
+    paste(
+      "Левое и правое плечи указаны в ориентации target;",
+      "расстояние измерено между ближайшими границами N20 и плеча."
+    ),
+    paste(names(n20_table), collapse = "\t"),
+    n20_lines,
+    "",
+    "QC скрининговых праймеров",
+    paste("Выбранная пара", screening_qc$pair_id, sep = "\t"),
+    paste(
+      "Оффтаргетные ПЦР-продукты, всего",
+      screening_qc$offtarget_products,
+      sep = "\t"
+    ),
+    paste(
+      "Высокорисковые оффтаргетные ПЦР-продукты",
+      screening_qc$high_risk_offtarget_products,
+      sep = "\t"
+    ),
+    paste(
+      "Оффтаргетные сайты с идеальным совпадением 3'-концов",
+      screening_qc$perfect_3p_offtarget_sites,
+      sep = "\t"
+    ),
+    "",
+    "Метрики качества openPrimeR для выбранной screening-пары",
+    paste(names(openprimer_table), collapse = "\t"),
+    openprimer_lines
   )
   writeLines(
     enc2utf8(report),
@@ -3332,6 +3502,35 @@ write_design_outputs <- function(
     ,
     drop = FALSE
   ]
+  selected_openprimer <- bind_rows(Filter(
+    function(metrics) {
+      "pair_id" %in% names(metrics) &&
+        any(metrics$pair_id == selected_screening_pair_id)
+    },
+    arms$primer_qc_trace$openprimer
+  ))
+  selected_openprimer <- selected_openprimer[
+    selected_openprimer$pair_id == selected_screening_pair_id,
+    ,
+    drop = FALSE
+  ]
+  if (nrow(screening_rank) != 1L || nrow(selected_openprimer) != 1L) {
+    stop("Не удалось собрать QC выбранной screening-пары", call. = FALSE)
+  }
+  n20_distances <- calculate_n20_arm_distances(
+    selected$table,
+    arms$ticks,
+    feature$strand
+  )
+  screening_qc <- list(
+    pair_id = selected_screening_pair_id,
+    offtarget_products = screening_rank$n_all_offtarget_products[[1]],
+    high_risk_offtarget_products =
+      screening_rank$n_high_risk_offtarget_products[[1]],
+    perfect_3p_offtarget_sites =
+      screening_rank$n_perfect_3p_offtarget_sites[[1]],
+    openprimer_metrics = format_openprimer_report_metrics(selected_openprimer)
+  )
 
   writeLines(
     c(
@@ -3430,7 +3629,9 @@ write_design_outputs <- function(
       sequences = final_sequences,
       sequence_purposes = sequence_purposes,
       primer_metrics = primer_metrics,
-      screening_product_sizes = screening_product_sizes
+      screening_product_sizes = screening_product_sizes,
+      n20_distances = n20_distances,
+      screening_qc = screening_qc
     ),
     primer_qc_trace = arms$primer_qc_trace,
     homology_pair_id = arms$selected_pair_id,
@@ -3730,7 +3931,9 @@ design_target <- function(input, genome_name, gene_name, design_class) {
           design$primer_paths$wet_lab$sequences,
           design$primer_paths$wet_lab$sequence_purposes,
           design$primer_paths$wet_lab$primer_metrics,
-          design$primer_paths$wet_lab$screening_product_sizes
+          design$primer_paths$wet_lab$screening_product_sizes,
+          design$primer_paths$wet_lab$n20_distances,
+          design$primer_paths$wet_lab$screening_qc
         )
       )
       append_design_log(log_path, "target", "OK")

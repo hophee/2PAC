@@ -45,6 +45,7 @@ rm -rf "$OUTPUT_DIR"
 cd "$PROJECT_DIR" || fail "cannot enter project directory"
 
 Rscript test/test_unit.R || fail "unit tests failed"
+Rscript test/test_screening_fixture.R || fail "screening fixture failed"
 
 if ! Rscript oligo_designer.R \
   --genome "$TEST_DIR/MG1655.fna" \
@@ -128,10 +129,10 @@ for gene in recA pta hupB; do
   txt_records="$(awk 'NR > 1 { count++ } END { print count + 0 }' "$wet_target_dir/final_sequences.txt")"
   [[ "$fasta_records" -eq "$txt_records" ]] ||
     fail "WetLab FASTA and TXT sequence sets differ for $gene"
-  grep -q 'Неуспешная вставка' "$wet_target_dir/wet_lab_report.txt" ||
-    fail "WetLab report lacks the unsuccessful-insertion PCR size for $gene"
-  grep -q 'Успешная вставка' "$wet_target_dir/wet_lab_report.txt" ||
-    fail "WetLab report lacks the successful-insertion PCR size for $gene"
+  grep -q 'Без успешного нокаута' "$wet_target_dir/wet_lab_report.txt" ||
+    fail "WetLab report lacks the unsuccessful-knockout PCR size for $gene"
+  grep -q 'С успешным нокаутом' "$wet_target_dir/wet_lab_report.txt" ||
+    fail "WetLab report lacks the successful-knockout PCR size for $gene"
   grep -q $'\tprimer_qc\tOK\t' "$target_dir/design.log" ||
     fail "design.log lacks primer_qc OK for $gene"
   Rscript - "$target_dir" <<'EOF' || fail "selected primer QC trace is invalid for $gene"
