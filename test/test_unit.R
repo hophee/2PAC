@@ -55,6 +55,8 @@ assert_true(
 assert_true(defaults$n20_mn == 1L, "n20_mn default is not 1")
 assert_true(defaults$n20_strands == "random", "strand default is not random")
 assert_true(identical(defaults$n20_offtarget, 0L), "MM default is not 0")
+assert_true(defaults$site1 == "ACTAGT", "site1 default is not SpeI")
+assert_true(defaults$site2 == "CTGCAG", "site2 default is not PstI")
 assert_true(!defaults$cds_fs && !defaults$ncrna_fs, "FS defaults are not FALSE")
 assert_true(
   identical(unname(defaults$left_arm), c(300L, 350L, 400L)),
@@ -88,6 +90,8 @@ configured <- parse_designer_args(c(
   "--n20-mn", "3",
   "--n20-strands", "both",
   "--n20-offtarget", "0,2,4",
+  "--site1", "ggatcc",
+  "--site2", "aagctt",
   "--cds-fs"
 ))
 assert_true(configured$n20_mn == 3L, "n20_mn was not parsed")
@@ -97,6 +101,10 @@ assert_true(
   "MM thresholds were not parsed"
 )
 assert_true(configured$cds_fs, "cds_fs flag was not parsed")
+assert_true(
+  configured$site1 == "GGATCC" && configured$site2 == "AAGCTT",
+  "Restriction sites were not parsed and normalized"
+)
 
 duplicate_targets <- base_args
 duplicate_targets[[length(duplicate_targets)]] <- "geneA,geneA"
@@ -112,6 +120,14 @@ assert_error(
 assert_error(
   parse_designer_args(c(base_args, "--left-arm-min", "401")),
   "min <= opt <= max"
+)
+assert_error(
+  parse_designer_args(c(base_args, "--site1", "ACTNGT")),
+  "A/C/G/T"
+)
+assert_error(
+  parse_designer_args(c(base_args, "--site2", "ACTAGT")),
+  "должны быть разными"
 )
 
 feature <- list(start = 100L, end = 299L, length = 200L)
@@ -564,6 +580,114 @@ assert_true(
   "Minus-strand arm labels were not oriented to the target"
 )
 
+circular_ptarget <- DNAString("GCAGGGGACTAGTCCCCCT")
+assembly_bridge <- "ATGACTGCCCGCAAG"
+assembly_n20 <- c(
+  "ACGTACGTACGTACGTACGT",
+  "TGCATGCATGCATGCATGCA"
+)
+assembly_sgrna_products <- paste0(
+  "ACGACTAGT",
+  assembly_n20,
+  "GGGAGCGTCAACT"
+)
+assembly_left_product <- paste0(
+  "AGCGTCAACTAACCGG",
+  assembly_bridge
+)
+assembly_right_product <- paste0(
+  assembly_bridge,
+  "TTGGCCCTGCAGCGT"
+)
+ptarget_model <- model_edited_ptargets(
+  circular_ptarget,
+  assembly_sgrna_products,
+  assembly_left_product,
+  assembly_bridge,
+  assembly_right_product,
+  name_prefix = "geneA"
+)
+assert_true(
+  ptarget_model$restriction_pair$orientation == "+" &&
+    identical(ptarget_model$restriction_pair$site2_start, 18L),
+  "Circular restriction site crossing the FASTA origin was not found"
+)
+assert_true(
+  length(ptarget_model$sequences) == 2L &&
+    identical(
+      names(ptarget_model$sequences),
+      c("geneA_pTarget_N20_1", "geneA_pTarget_N20_2")
+    ),
+  "A separate edited pTarget was not made for every N20"
+)
+assert_true(
+  all(startsWith(as.character(ptarget_model$sequences), "ACTAGT")) &&
+    !any(startsWith(as.character(ptarget_model$sequences), "AACTAGT")),
+  "Edited pTarget retains the legacy duplicated-A error"
+)
+minus_oriented <- find_oriented_restriction_pair(
+  DNAString(reverse_complement_string("AAAACTTTTGCGTAGGG")),
+  "AAAAC",
+  "GCGTA"
+)
+assert_true(
+  minus_oriented$orientation == "-",
+  "Reverse-oriented restriction pair was not recognized"
+)
+assert_error(
+  find_oriented_restriction_pair(
+    DNAString("ACTAGTAAAAACTAGTCCCCCTGCAGGGG"),
+    "ACTAGT",
+    "CTGCAG"
+  ),
+  "ровно один раз"
+)
+
+circular_pcr <- locate_circular_pcr_template(
+  DNAString("CCGGTTAAAAAAGGGACGTTGCA"),
+  "ACGTTGCA",
+  "TTAACCGG",
+  100L
+)
+assert_true(
+  circular_pcr$wraps_origin &&
+    as.character(circular_pcr$sequence) == "ACGTTGCACCGGTTAA",
+  "Circular PCR location crossing the FASTA origin is incorrect"
+)
+
+pcr_forward_annealing <- "ACGTTGCAAGTCGATCGTAC"
+pcr_reverse_annealing <- "TGACCTGACTAGGCTACGTA"
+pcr_full_forward <- paste0("AGCGTCAACT", pcr_forward_annealing)
+pcr_full_reverse <- paste0("ATGACTGCCCGCAAG", pcr_reverse_annealing)
+pcr_template <- paste0(
+  pcr_forward_annealing,
+  "AACCGGTTAACC",
+  reverse_complement_string(pcr_reverse_annealing)
+)
+pcr_products <- simulate_full_primer_pcr(
+  "test_full_primer_product",
+  "Full-primer PCR test",
+  "fixture:1-52 (+)",
+  pcr_template,
+  "test_F",
+  "test_R",
+  pcr_full_forward,
+  pcr_full_reverse,
+  pcr_forward_annealing,
+  pcr_reverse_annealing,
+  57,
+  primer3_buffer_parameters(),
+  200L
+)
+assert_true(
+  startsWith(pcr_products$sequence, pcr_full_forward) &&
+    endsWith(
+      pcr_products$sequence,
+      reverse_complement_string(pcr_full_reverse)
+    ),
+  "DECIPHER PCR product does not include full service-tailed primers"
+)
+
 openprimer_report_metrics <- format_openprimer_report_metrics(data.frame(
   constraints_passed = TRUE,
   gc_ratio_fw = 0.5,
@@ -611,13 +735,21 @@ write_wet_lab_outputs(
     high_risk_offtarget_products = 0L,
     perfect_3p_offtarget_sites = 0L,
     openprimer_metrics = openprimer_report_metrics
-  )
+  ),
+  DNAStringSet(c(edited_genome = "AACCGGTTAACC")),
+  ptarget_model$sequences,
+  ptarget_model$restriction_pair,
+  pcr_products
 )
 assert_true(
   all(c(
     "final_sequences.fasta",
     "final_sequences.txt",
-    "wet_lab_report.txt"
+    "wet_lab_report.txt",
+    "edited_genome.fasta",
+    "edited_pTargets.fasta",
+    "pcr_products.fasta",
+    "pcr_products.tsv"
   ) %in% list.files(wet_lab_dir)),
   "WetLab lacks a required file"
 )
@@ -641,6 +773,20 @@ assert_true(
 assert_true(
   identical(wet_lab_table$sequence, unname(as.character(wet_lab_sequences))),
   "WetLab FASTA and TXT contain different sequences"
+)
+assert_true(
+  length(readDNAStringSet(file.path(wet_lab_dir, "edited_pTargets.fasta"))) ==
+    nrow(n20_distances),
+  "WetLab does not contain one edited pTarget per N20"
+)
+wet_lab_pcr <- read_tsv(
+  file.path(wet_lab_dir, "pcr_products.tsv"),
+  show_col_types = FALSE
+)
+assert_true(
+  identical(wet_lab_pcr$name, pcr_products$name) &&
+    identical(wet_lab_pcr$sequence, pcr_products$sequence),
+  "WetLab PCR table changed the modelled product identity or sequence"
 )
 wet_lab_report <- readLines(
   file.path(wet_lab_dir, "wet_lab_report.txt"),
@@ -667,6 +813,16 @@ assert_true(
     any(grepl("GC-состав forward-праймера.*50", wet_lab_report)),
   "WetLab report lacks readable screening primer QC"
 )
+assert_true(
+  any(grepl("edited_genome.fasta.*edited_genome", wet_lab_report)) &&
+    sum(grepl("edited_pTargets.fasta.*edited_pTarget", wet_lab_report)) == 2L,
+  "WetLab report lacks the modelled genome or per-N20 pTargets"
+)
+assert_true(
+  any(grepl("DECIPHER::AmplifyDNA", wet_lab_report, fixed = TRUE)) &&
+    any(grepl("test_full_primer_product.*fixture:1-52.*57 C", wet_lab_report)),
+  "WetLab report lacks PCR product location, conditions, or sequence"
+)
 
 error_root <- tempfile("2pac-error-")
 dir.create(error_root)
@@ -678,7 +834,15 @@ stale_wet_lab_dir <- file.path(
 dir.create(stale_wet_lab_dir, recursive = TRUE)
 stale_wet_lab_files <- file.path(
   stale_wet_lab_dir,
-  c("final_sequences.fasta", "final_sequences.txt", "wet_lab_report.txt")
+  c(
+    "final_sequences.fasta",
+    "final_sequences.txt",
+    "wet_lab_report.txt",
+    "edited_genome.fasta",
+    "edited_pTargets.fasta",
+    "pcr_products.fasta",
+    "pcr_products.tsv"
+  )
 )
 file.create(stale_wet_lab_files)
 error_input <- list(

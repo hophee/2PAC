@@ -12,6 +12,464 @@ source("callPrimer3.R")
   if (is.null(x)) y else x
 }
 
+normalize_restriction_site <- function(site, argument_name) {
+  site <- toupper(trimws(as.character(site)))
+  if (length(site) != 1L || is.na(site) || !nzchar(site) ||
+    !grepl("^[ACGT]+$", site)) {
+    stop(
+      sprintf("%s должен быть непустой последовательностью A/C/G/T", argument_name),
+      call. = FALSE
+    )
+  }
+  site
+}
+
+reverse_complement_string <- function(sequence) {
+  paste0(
+    rev(strsplit(chartr("ACGT", "TGCA", toupper(sequence)), "")[[1]]),
+    collapse = ""
+  )
+}
+
+circular_match_positions <- function(sequence, motif) {
+  sequence <- toupper(as.character(sequence))
+  motif <- toupper(as.character(motif))
+  sequence_length <- nchar(sequence)
+  motif_length <- nchar(motif)
+  if (!sequence_length || !motif_length || motif_length > sequence_length) {
+    return(integer())
+  }
+  extended <- paste0(
+    sequence,
+    if (motif_length > 1L) substr(sequence, 1L, motif_length - 1L) else ""
+  )
+  hits <- gregexpr(motif, extended, fixed = TRUE)[[1]]
+  as.integer(unique(hits[hits > 0L & hits <= sequence_length]))
+}
+
+find_oriented_restriction_pair <- function(plasmid, site1, site2) {
+  sequence <- toupper(as.character(plasmid))
+  site1 <- normalize_restriction_site(site1, "site1")
+  site2 <- normalize_restriction_site(site2, "site2")
+  if (site1 == site2) {
+    stop("site1 и site2 должны быть разными", call. = FALSE)
+  }
+
+  locate_site <- function(site, label) {
+    forward <- circular_match_positions(sequence, site)
+    reverse <- circular_match_positions(
+      sequence,
+      reverse_complement_string(site)
+    )
+    positions <- sort(unique(c(forward, reverse)))
+    if (length(positions) != 1L) {
+      stop(
+        sprintf(
+          "%s должен встречаться в кольцевой pTarget ровно один раз; найдено: %d",
+          label,
+          length(positions)
+        ),
+        call. = FALSE
+      )
+    }
+    list(
+      position = positions[[1]],
+      strands = c(
+        if (positions[[1]] %in% forward) "+",
+        if (positions[[1]] %in% reverse) "-"
+      )
+    )
+  }
+
+  first <- locate_site(site1, "site1")
+  second <- locate_site(site2, "site2")
+  orientations <- intersect(first$strands, second$strands)
+  if (!length(orientations)) {
+    stop("site1 и site2 имеют несовместимую ориентацию", call. = FALSE)
+  }
+  orientation <- if ("+" %in% orientations) "+" else "-"
+  oriented <- if (orientation == "+") {
+    sequence
+  } else {
+    reverse_complement_string(sequence)
+  }
+  site1_start <- circular_match_positions(oriented, site1)
+  site2_start <- circular_match_positions(oriented, site2)
+  if (length(site1_start) != 1L || length(site2_start) != 1L) {
+    stop("Не удалось однозначно ориентировать пару сайтов", call. = FALSE)
+  }
+
+  rotated <- paste0(
+    substr(oriented, site1_start, nchar(oriented)),
+    if (site1_start > 1L) substr(oriented, 1L, site1_start - 1L) else ""
+  )
+  site2_rotated <- ((site2_start - site1_start) %% nchar(oriented)) + 1L
+  replaced_length <- site2_rotated + nchar(site2) - 1L
+  if (
+    site2_rotated <= nchar(site1) ||
+      replaced_length >= nchar(oriented)
+  ) {
+    stop(
+      "Сайты рестрикции перекрываются или не оставляют pTarget backbone",
+      call. = FALSE
+    )
+  }
+  list(
+    backbone = substr(rotated, replaced_length + 1L, nchar(rotated)),
+    orientation = orientation,
+    site1_start = first$position,
+    site2_start = second$position
+  )
+}
+
+model_edited_ptargets <- function(
+  plasmid,
+  sgrna_products,
+  left_arm_product,
+  bridge,
+  right_arm_product,
+  site1 = "ACTAGT",
+  site2 = "CTGCAG",
+  name_prefix = "pTarget"
+) {
+  site1 <- normalize_restriction_site(site1, "site1")
+  site2 <- normalize_restriction_site(site2, "site2")
+  sgrna_products <- toupper(as.character(sgrna_products))
+  left_arm_product <- toupper(as.character(left_arm_product))
+  right_arm_product <- toupper(as.character(right_arm_product))
+  left_overlap <- "AGCGTCAACT"
+  if (
+    !length(sgrna_products) ||
+      length(left_arm_product) != 1L ||
+      length(right_arm_product) != 1L ||
+      any(!endsWith(sgrna_products, left_overlap)) ||
+      !startsWith(left_arm_product, left_overlap) ||
+      !endsWith(left_arm_product, bridge) ||
+      !startsWith(right_arm_product, bridge)
+  ) {
+    stop("PCR-продукты не содержат ожидаемые перекрытия сборки", call. = FALSE)
+  }
+  pair <- find_oriented_restriction_pair(plasmid, site1, site2)
+  assembled <- paste0(
+    sgrna_products,
+    substr(left_arm_product, nchar(left_overlap) + 1L, nchar(left_arm_product)),
+    substr(right_arm_product, nchar(bridge) + 1L, nchar(right_arm_product))
+  )
+  inserts <- substr(assembled, 4L, nchar(assembled) - 3L)
+  if (
+    any(!startsWith(inserts, site1)) ||
+      any(!endsWith(inserts, site2))
+  ) {
+    stop("PCR-сборка не ограничена ожидаемыми site1/site2", call. = FALSE)
+  }
+  edited <- DNAStringSet(paste0(inserts, pair$backbone))
+  names(edited) <- paste0(name_prefix, "_pTarget_N20_", seq_along(edited))
+  list(sequences = edited, restriction_pair = pair)
+}
+
+locate_circular_pcr_template <- function(
+  plasmid,
+  forward_primer,
+  reverse_primer,
+  max_product_size
+) {
+  sequence <- toupper(as.character(plasmid))
+  forward_primer <- toupper(as.character(forward_primer))
+  reverse_binding <- reverse_complement_string(reverse_primer)
+  sequence_length <- nchar(sequence)
+  candidates <- list()
+  for (strand in c("+", "-")) {
+    oriented <- if (strand == "+") sequence else {
+      reverse_complement_string(sequence)
+    }
+    forward_starts <- circular_match_positions(oriented, forward_primer)
+    reverse_starts <- circular_match_positions(oriented, reverse_binding)
+    for (forward_start in forward_starts) {
+      for (reverse_start in reverse_starts) {
+        offset <- (reverse_start - forward_start) %% sequence_length
+        product_length <- offset + nchar(reverse_binding)
+        if (
+          offset < nchar(forward_primer) ||
+            product_length > max_product_size ||
+            product_length > sequence_length
+        ) {
+          next
+        }
+        oriented_end <- ((forward_start + product_length - 2L) %%
+          sequence_length) + 1L
+        original_start <- if (strand == "+") {
+          forward_start
+        } else {
+          sequence_length - forward_start + 1L
+        }
+        original_end <- if (strand == "+") {
+          oriented_end
+        } else {
+          sequence_length - oriented_end + 1L
+        }
+        candidates[[length(candidates) + 1L]] <- list(
+          sequence = DNAString(substr(
+            paste0(oriented, oriented),
+            forward_start,
+            forward_start + product_length - 1L
+          )),
+          start = original_start,
+          end = original_end,
+          strand = strand,
+          wraps_origin = oriented_end < forward_start
+        )
+      }
+    }
+  }
+  if (length(candidates) != 1L) {
+    stop(
+      sprintf(
+        "Ожидался один sgRNA PCR-продукт на кольцевой pTarget; найдено: %d",
+        length(candidates)
+      ),
+      call. = FALSE
+    )
+  }
+  candidates[[1]]
+}
+
+simulate_full_primer_pcr <- function(
+  reaction,
+  description,
+  location,
+  template_amplicon,
+  forward_name,
+  reverse_name,
+  full_forward,
+  full_reverse,
+  annealing_forward,
+  annealing_reverse,
+  annealing_temp_c,
+  buffer = primer3_buffer_parameters(),
+  max_product_size = 2000L
+) {
+  if (!requireNamespace("DECIPHER", quietly = TRUE)) {
+    stop("R-пакет DECIPHER не установлен", call. = FALSE)
+  }
+  full_forward <- toupper(as.character(full_forward))
+  full_reverse <- toupper(as.character(full_reverse))
+  annealing_forward <- toupper(as.character(annealing_forward))
+  annealing_reverse <- toupper(as.character(annealing_reverse))
+  template_amplicon <- toupper(as.character(template_amplicon))
+  if (
+    !endsWith(full_forward, annealing_forward) ||
+      !endsWith(full_reverse, annealing_reverse) ||
+      nchar(template_amplicon) <
+        nchar(annealing_forward) + nchar(annealing_reverse) ||
+      !startsWith(template_amplicon, annealing_forward) ||
+      !endsWith(
+        template_amplicon,
+        reverse_complement_string(annealing_reverse)
+      )
+  ) {
+    stop(
+      sprintf("Некорректные праймеры или шаблон для PCR %s", reaction),
+      call. = FALSE
+    )
+  }
+
+  interior_start <- nchar(annealing_forward) + 1L
+  interior_end <- nchar(template_amplicon) - nchar(annealing_reverse)
+  interior <- if (interior_start <= interior_end) {
+    substr(template_amplicon, interior_start, interior_end)
+  } else {
+    ""
+  }
+  # AmplifyDNA cannot match long non-annealing 5' tails on the initial template.
+  # After cycle one those tails are incorporated, which is the template modelled.
+  primed_template <- paste0(
+    full_forward,
+    interior,
+    reverse_complement_string(full_reverse)
+  )
+  primers <- DNAStringSet(c(forward = full_forward, reverse = full_reverse))
+  templates <- DNAStringSet(c(post_first_cycle = primed_template))
+  effective_max <- max(as.integer(max_product_size), nchar(primed_template))
+  configure_openprimer_environment()
+  products <- DECIPHER::AmplifyDNA(
+    primers,
+    templates,
+    maxProductSize = effective_max,
+    annealingTemp = annealing_temp_c,
+    P = buffer[["dna_nm"]] * 1e-9,
+    ions = 0.2,
+    includePrimers = TRUE,
+    minEfficiency = 0.001,
+    processors = 1L
+  )
+  expected <- which(as.character(products) == primed_template)
+  if (length(expected) != 1L) {
+    stop(
+      sprintf("DECIPHER не вернул однозначный PCR-продукт для %s", reaction),
+      call. = FALSE
+    )
+  }
+  product <- products[expected]
+  conditions <- paste0(
+    "annealing=", format(annealing_temp_c, trim = TRUE), " C; ",
+    "primer=", buffer[["dna_nm"]], " nM each; ",
+    "monovalent=", buffer[["monovalent_salt_mm"]], " mM; ",
+    "Mg=", buffer[["divalent_salt_mm"]], " mM; ",
+    "dNTP=", buffer[["dntp_mm"]], " mM; ",
+    "DECIPHER ions=0.2 M"
+  )
+  data.frame(
+    name = reaction,
+    description = description,
+    location = location,
+    length_bp = length(product[[1]]),
+    primers = paste(forward_name, reverse_name, sep = " + "),
+    pcr_conditions = conditions,
+    sequence = as.character(product[[1]]),
+    stringsAsFactors = FALSE
+  )
+}
+
+model_design_pcr_products <- function(
+  input,
+  feature,
+  pair,
+  sgrnas,
+  sgrna_reverse,
+  arm_primers,
+  screening,
+  screening_primers,
+  edited_genome,
+  screening_product_sizes
+) {
+  max_product_size <- input$parameters$primer_qc$max_product_size
+  buffer <- input$parameters$primer3_buffer
+  sgrna_annealing <- substr(
+    as.character(sgrnas[[1]]),
+    3L + nchar(input$parameters$site1) + 20L + 1L,
+    length(sgrnas[[1]])
+  )
+  ptarget_template <- locate_circular_pcr_template(
+    input$target_plasmid_sequence,
+    sgrna_annealing,
+    as.character(sgrna_reverse[[1]]),
+    max_product_size
+  )
+  ptarget_location <- paste0(
+    input$target_plasmid_name %||% "pTarget",
+    ":",
+    ptarget_template$start,
+    "->",
+    ptarget_template$end,
+    " (",
+    ptarget_template$strand,
+    ", circular",
+    if (ptarget_template$wraps_origin) ", crosses FASTA origin" else "",
+    ")"
+  )
+  rows <- lapply(seq_along(sgrnas), function(i) {
+    simulate_full_primer_pcr(
+      paste0("sgRNA_N20_", i),
+      paste0("ПЦР sgRNA-кассеты для N20_", i),
+      ptarget_location,
+      ptarget_template$sequence,
+      names(sgrnas)[[i]],
+      names(sgrna_reverse)[[1]],
+      sgrnas[[i]],
+      sgrna_reverse[[1]],
+      sgrna_annealing,
+      sgrna_reverse[[1]],
+      60,
+      buffer,
+      max_product_size
+    )
+  })
+
+  genome_name <- input$genome_contig %||% "genome"
+  for (i in seq_len(2L)) {
+    template <- input$genome[
+      pair$genome_start[[i]]:pair$genome_end[[i]]
+    ]
+    if (feature$strand == "-") {
+      template <- reverseComplement(template)
+    }
+    reaction <- c("left_homology_arm", "right_homology_arm")[[i]]
+    rows[[length(rows) + 1L]] <- simulate_full_primer_pcr(
+      reaction,
+      paste(
+        "ПЦР",
+        c("левого", "правого")[[i]],
+        "плеча гомологии"
+      ),
+      sprintf(
+        "%s:%d-%d (%s)",
+        genome_name,
+        pair$genome_start[[i]],
+        pair$genome_end[[i]],
+        feature$strand
+      ),
+      template,
+      names(arm_primers)[[2L * i - 1L]],
+      names(arm_primers)[[2L * i]],
+      arm_primers[[2L * i - 1L]],
+      arm_primers[[2L * i]],
+      pair$PRIMER_LEFT_SEQUENCE[[i]],
+      pair$PRIMER_RIGHT_SEQUENCE[[i]],
+      round(min(
+        pair$PRIMER_LEFT_TM[[i]],
+        pair$PRIMER_RIGHT_TM[[i]]
+      ) - 3, 1),
+      buffer,
+      max_product_size
+    )
+  }
+
+  screening_start <- screening$genome_start[[1]]
+  original_end <- screening$genome_end[[1]]
+  edited_end <- screening_start +
+    screening_product_sizes[["successful_insertion_bp"]] - 1L
+  if (edited_end > length(edited_genome[[1]])) {
+    stop("Скрининговый PCR-продукт выходит за границу edited genome", call. = FALSE)
+  }
+  screening_temp <- round(min(
+    screening$PRIMER_LEFT_TM[[1]],
+    screening$PRIMER_RIGHT_TM[[1]]
+  ) - 3, 1)
+  screening_templates <- list(
+    original_genome = input$genome[screening_start:original_end],
+    edited_genome = edited_genome[[1]][screening_start:edited_end]
+  )
+  screening_ends <- c(original_end, edited_end)
+  screening_descriptions <- c(
+    "Скрининговая ПЦР исходного генома",
+    "Скрининговая ПЦР редактированного генома"
+  )
+  for (i in seq_along(screening_templates)) {
+    template_name <- names(screening_templates)[[i]]
+    rows[[length(rows) + 1L]] <- simulate_full_primer_pcr(
+      paste0("screening_", template_name),
+      screening_descriptions[[i]],
+      sprintf(
+        "%s:%d-%d (+)",
+        if (i == 1L) genome_name else "edited_genome",
+        screening_start,
+        screening_ends[[i]]
+      ),
+      screening_templates[[i]],
+      names(screening_primers)[[1]],
+      names(screening_primers)[[2]],
+      screening_primers[[1]],
+      screening_primers[[2]],
+      screening$PRIMER_LEFT_SEQUENCE[[1]],
+      screening$PRIMER_RIGHT_SEQUENCE[[1]],
+      screening_temp,
+      buffer,
+      max_product_size
+    )
+  }
+  bind_rows(rows)
+}
+
 extract_gff_attribute <- function(attributes, attribute_name) {
   pattern <- paste0("(?:^|;)\\s*", attribute_name, "=([^;]+)")
   matches <- regexec(pattern, attributes, perl = TRUE)
@@ -118,6 +576,19 @@ parse_designer_args <- function(args) {
     parser,
     "--target-plasmid",
     help = "Path to the target plasmid FASTA file"
+  )
+  # TODO: map enzyme names to recognition sites via a maintained site dictionary.
+  parser <- add_argument(
+    parser,
+    "--site1",
+    help = "First restriction-site sequence in insert orientation",
+    default = "ACTAGT"
+  )
+  parser <- add_argument(
+    parser,
+    "--site2",
+    help = "Second restriction-site sequence in insert orientation",
+    default = "CTGCAG"
   )
   parser <- add_argument(
     parser,
@@ -424,6 +895,8 @@ parse_designer_args <- function(args) {
     genome = normalize_scalar(parsed$genome),
     genome_annotation = normalize_scalar(parsed$genome_annotation),
     target_plasmid = normalize_scalar(parsed$target_plasmid),
+    site1 = normalize_restriction_site(parsed$site1, "--site1"),
+    site2 = normalize_restriction_site(parsed$site2, "--site2"),
     output_dir = normalize_scalar(parsed$output_dir),
     cds = normalize_targets(parsed$cds),
     ncrna = normalize_targets(parsed$ncrna),
@@ -442,6 +915,9 @@ parse_designer_args <- function(args) {
     n20_arm_min_distance = n20_arm_min_distance,
     primer_qc = utils::modifyList(primer_qc_defaults(), as.list(qc_values))
   )
+  if (values$site1 == values$site2) {
+    stop("--site1 и --site2 должны быть разными", call. = FALSE)
+  }
 
   required <- c("genome", "genome_annotation", "target_plasmid", "output_dir")
   required_options <- c(
@@ -1529,6 +2005,8 @@ write_run_parameters <- function(input, targets, path) {
     genome_annotation_file = input$annotation_path,
     annotation_format = input$annotation_format,
     target_plasmid_file = input$target_plasmid,
+    ptarget_site1 = input$parameters$site1,
+    ptarget_site2 = input$parameters$site2,
     cas_plasmid_file = if (is.null(input$cas_plasmid)) NA_character_ else {
       input$cas_plasmid
     },
@@ -1593,6 +2071,10 @@ write_run_parameters <- function(input, targets, path) {
       as.character(utils::packageVersion("openPrimeR")),
       error = function(e) NA_character_
     ),
+    decipher_version = tryCatch(
+      as.character(utils::packageVersion("DECIPHER")),
+      error = function(e) NA_character_
+    ),
     biostrings_version = as.character(packageVersion("Biostrings")),
     melting_executable = Sys.which("melting-batch"),
     viennarna_executable = Sys.which("RNAfold"),
@@ -1619,6 +2101,18 @@ make_design_input <- function(cli) {
     cli$target_plasmid[[1]],
     if (length(cli$cas_plasmid)) cli$cas_plasmid[[1]] else NULL
   )
+  target_records <- which(references$reference_type == "target_plasmid")
+  if (length(target_records) != 1L) {
+    stop(
+      "Для моделирования требуется ровно одна запись pTarget в FASTA",
+      call. = FALSE
+    )
+  }
+  find_oriented_restriction_pair(
+    references$sequence[[target_records[[1]]]],
+    cli$site1,
+    cli$site2
+  )
   input <- list(
     genome_path = cli$genome[[1]],
     annotation_path = cli$genome_annotation[[1]],
@@ -1630,6 +2124,8 @@ make_design_input <- function(cli) {
       cli$annotation_format[[1]]
     ),
     target_plasmid = cli$target_plasmid[[1]],
+    target_plasmid_sequence = references$sequence[[target_records[[1]]]],
+    target_plasmid_name = references$source_name[[target_records[[1]]]],
     cas_plasmid = if (length(cli$cas_plasmid)) cli$cas_plasmid[[1]] else NULL,
     output_dir = cli$output_dir[[1]],
     tools = list(
@@ -1642,6 +2138,8 @@ make_design_input <- function(cli) {
       n20_mn = cli$n20_mn,
       n20_strands = cli$n20_strands,
       n20_offtarget = cli$n20_offtarget,
+      site1 = cli$site1,
+      site2 = cli$site2,
       cds_fs = cli$cds_fs,
       ncrna_fs = cli$ncrna_fs,
       left_arm = cli$left_arm,
@@ -2699,7 +3197,11 @@ design_homology_arms <- function(
               input,
               primer_row,
               paste0(bridge, primer_row$PRIMER_LEFT_SEQUENCE[[1]]),
-              paste0("ACGCTGCAG", primer_row$PRIMER_RIGHT_SEQUENCE[[1]]),
+              paste0(
+                "ACG",
+                reverse_complement_string(input$parameters$site2),
+                primer_row$PRIMER_RIGHT_SEQUENCE[[1]]
+              ),
               reaction,
               physical_pair_id,
               trace
@@ -3097,7 +3599,11 @@ write_wet_lab_outputs <- function(
   primer_metrics,
   screening_product_sizes,
   n20_distances,
-  screening_qc
+  screening_qc,
+  edited_genome,
+  edited_ptargets,
+  ptarget_site_pair,
+  pcr_products
 ) {
   required_metrics <- c("name", "purpose", "annealing_sequence", "tm_c")
   required_distances <- c(
@@ -3108,6 +3614,13 @@ write_wet_lab_outputs <- function(
     "pair_id", "offtarget_products", "high_risk_offtarget_products",
     "perfect_3p_offtarget_sites", "openprimer_metrics"
   )
+  required_site_pair <- c(
+    "orientation", "site1_start", "site2_start"
+  )
+  required_pcr_products <- c(
+    "name", "description", "location", "length_bp", "primers",
+    "pcr_conditions", "sequence"
+  )
   if (
     !length(sequences) ||
       length(sequence_purposes) != length(sequences) ||
@@ -3117,6 +3630,13 @@ write_wet_lab_outputs <- function(
       !all(required_metrics %in% names(primer_metrics)) ||
       !all(required_distances %in% names(n20_distances)) ||
       !all(required_screening_qc %in% names(screening_qc)) ||
+      length(edited_genome) != 1L ||
+      length(edited_ptargets) != nrow(n20_distances) ||
+      is.null(names(edited_genome)) ||
+      is.null(names(edited_ptargets)) ||
+      !all(required_site_pair %in% names(ptarget_site_pair)) ||
+      !nrow(pcr_products) ||
+      !all(required_pcr_products %in% names(pcr_products)) ||
       !all(c("metric", "value") %in% names(screening_qc$openprimer_metrics)) ||
       !all(
         c("unsuccessful_insertion_bp", "successful_insertion_bp") %in%
@@ -3140,6 +3660,21 @@ write_wet_lab_outputs <- function(
     sequence_table,
     file.path(wet_lab_dir, "final_sequences.txt")
   )
+  writeXStringSet(
+    edited_genome,
+    file.path(wet_lab_dir, "edited_genome.fasta")
+  )
+  writeXStringSet(
+    edited_ptargets,
+    file.path(wet_lab_dir, "edited_pTargets.fasta")
+  )
+  pcr_product_sequences <- DNAStringSet(pcr_products$sequence)
+  names(pcr_product_sequences) <- pcr_products$name
+  writeXStringSet(
+    pcr_product_sequences,
+    file.path(wet_lab_dir, "pcr_products.fasta")
+  )
+  write_tsv(pcr_products, file.path(wet_lab_dir, "pcr_products.tsv"))
 
   sequence_lines <- apply(
     sequence_table,
@@ -3175,6 +3710,31 @@ write_wet_lab_outputs <- function(
     1L,
     function(row) paste(row, collapse = "\t")
   )
+  construction_table <- data.frame(
+    file = c(
+      "edited_genome.fasta",
+      rep("edited_pTargets.fasta", length(edited_ptargets))
+    ),
+    record = c(names(edited_genome), names(edited_ptargets)),
+    type = c("edited_genome", rep("edited_pTarget", length(edited_ptargets))),
+    length_bp = c(width(edited_genome), width(edited_ptargets)),
+    stringsAsFactors = FALSE
+  )
+  construction_lines <- apply(
+    construction_table,
+    1L,
+    function(row) paste(row, collapse = "\t")
+  )
+  pcr_table <- pcr_products[, required_pcr_products, drop = FALSE]
+  names(pcr_table) <- c(
+    "ПЦР-продукт", "Описание", "Локация", "Длина, п.н.",
+    "Полные праймеры", "Условия ПЦР", "Последовательность (5'-3')"
+  )
+  pcr_lines <- apply(
+    pcr_table,
+    1L,
+    function(row) paste(row, collapse = "\t")
+  )
   report <- c(
     "2PAC: отчёт для мокрой лаборатории",
     paste("Цель", feature$query_name, sep = "\t"),
@@ -3183,6 +3743,20 @@ write_wet_lab_outputs <- function(
     "Итоговый набор последовательностей",
     paste(names(sequence_table), collapse = "\t"),
     sequence_lines,
+    "",
+    "Моделированные конструкции",
+    paste(names(construction_table), collapse = "\t"),
+    construction_lines,
+    paste(
+      "Ориентация пары сайтов рестрикции в исходной pTarget",
+      ptarget_site_pair$orientation,
+      sep = "\t"
+    ),
+    "",
+    "PCR-продукты, смоделированные DECIPHER::AmplifyDNA",
+    "Последовательности включают полные праймеры со служебными 5'-хвостами.",
+    paste(names(pcr_table), collapse = "\t"),
+    pcr_lines,
     "",
     paste(
       "Температуры отжига праймеров",
@@ -3281,7 +3855,8 @@ write_design_outputs <- function(
   ))
   writeXStringSet(final_arms, file.path(target_dir, "homology_arms.fasta"))
   sgrnas <- DNAStringSet(paste0(
-    "ACGACTAGT",
+    "ACG",
+    input$parameters$site1,
     substr(selected$table$target_sequence, 1, 20),
     "GTTTTAGAGCTAGAAATAGCAAGTTaaaataaggct"
   ))
@@ -3290,7 +3865,11 @@ write_design_outputs <- function(
     paste0("AGCGTCAACT", pair$PRIMER_LEFT_SEQUENCE[[1]]),
     paste0(bridge_rc, pair$PRIMER_RIGHT_SEQUENCE[[1]]),
     paste0(bridge, pair$PRIMER_LEFT_SEQUENCE[[2]]),
-    paste0("ACGCTGCAG", pair$PRIMER_RIGHT_SEQUENCE[[2]])
+    paste0(
+      "ACG",
+      reverse_complement_string(input$parameters$site2),
+      pair$PRIMER_RIGHT_SEQUENCE[[2]]
+    )
   ))
   names(arm_primers) <- paste0(
     feature$display_name,
@@ -3455,6 +4034,39 @@ write_design_outputs <- function(
     input$genome,
     edited_genome
   )
+  pcr_products <- model_design_pcr_products(
+    input,
+    feature,
+    pair,
+    sgrnas,
+    sgrna_reverse,
+    arm_primers,
+    screening,
+    screening_primers,
+    edited_genome,
+    screening_product_sizes
+  )
+  pcr_product_sequences <- DNAStringSet(pcr_products$sequence)
+  names(pcr_product_sequences) <- pcr_products$name
+  writeXStringSet(
+    pcr_product_sequences,
+    file.path(target_dir, "pcr_products.fasta")
+  )
+  write_tsv(pcr_products, file.path(target_dir, "pcr_products.tsv"))
+  edited_ptargets <- model_edited_ptargets(
+    input$target_plasmid_sequence,
+    pcr_products$sequence[startsWith(pcr_products$name, "sgRNA_N20_")],
+    pcr_products$sequence[pcr_products$name == "left_homology_arm"],
+    bridge,
+    pcr_products$sequence[pcr_products$name == "right_homology_arm"],
+    input$parameters$site1,
+    input$parameters$site2,
+    feature$display_name
+  )
+  writeXStringSet(
+    edited_ptargets$sequences,
+    file.path(target_dir, "edited_pTargets.fasta")
+  )
   final_sequences <- c(all_primers, screening_primers)
   primer_purposes <- c(
     "left_arm_forward_primer",
@@ -3537,6 +4149,18 @@ write_design_outputs <- function(
       paste("target", feature$query_name, sep = "\t"),
       paste("class", design_class, sep = "\t"),
       paste("n20_count", nrow(selected$table), sep = "\t"),
+      paste("ptarget_site1", input$parameters$site1, sep = "\t"),
+      paste("ptarget_site2", input$parameters$site2, sep = "\t"),
+      paste(
+        "ptarget_site_pair_orientation",
+        edited_ptargets$restriction_pair$orientation,
+        sep = "\t"
+      ),
+      paste(
+        "edited_ptarget_count",
+        length(edited_ptargets$sequences),
+        sep = "\t"
+      ),
       paste(
         "n20_strands",
         paste(sort(unique(selected$table$strand)), collapse = ","),
@@ -3631,7 +4255,11 @@ write_design_outputs <- function(
       primer_metrics = primer_metrics,
       screening_product_sizes = screening_product_sizes,
       n20_distances = n20_distances,
-      screening_qc = screening_qc
+      screening_qc = screening_qc,
+      edited_genome = edited_genome,
+      edited_ptargets = edited_ptargets$sequences,
+      ptarget_site_pair = edited_ptargets$restriction_pair,
+      pcr_products = pcr_products
     ),
     primer_qc_trace = arms$primer_qc_trace,
     homology_pair_id = arms$selected_pair_id,
@@ -3847,7 +4475,11 @@ design_target <- function(input, genome_name, gene_name, design_class) {
     c(
       "final_sequences.fasta",
       "final_sequences.txt",
-      "wet_lab_report.txt"
+      "wet_lab_report.txt",
+      "edited_genome.fasta",
+      "edited_pTargets.fasta",
+      "pcr_products.fasta",
+      "pcr_products.tsv"
     )
   ))
   dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
@@ -3933,7 +4565,11 @@ design_target <- function(input, genome_name, gene_name, design_class) {
           design$primer_paths$wet_lab$primer_metrics,
           design$primer_paths$wet_lab$screening_product_sizes,
           design$primer_paths$wet_lab$n20_distances,
-          design$primer_paths$wet_lab$screening_qc
+          design$primer_paths$wet_lab$screening_qc,
+          design$primer_paths$wet_lab$edited_genome,
+          design$primer_paths$wet_lab$edited_ptargets,
+          design$primer_paths$wet_lab$ptarget_site_pair,
+          design$primer_paths$wet_lab$pcr_products
         )
       )
       append_design_log(log_path, "target", "OK")

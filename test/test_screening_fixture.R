@@ -34,11 +34,11 @@ local({
       data.frame(
         PRIMER_LEFT_SEQUENCE = c("ACGTCGATCGTAGCTACGTA", "GCTAGTCGATGCTACGTAGC"),
         PRIMER_RIGHT_SEQUENCE = c("TGCATCGATGCTAGTCGTAC", "CGTACGATCGTAGCATCGAC"),
-        PRIMER_LEFT_pos = c(100L, 110L),
-        PRIMER_RIGHT_pos = c(1099L, 1109L),
+        PRIMER_LEFT_pos = c(1L, 10L),
+        PRIMER_RIGHT_pos = c(1200L, 1250L),
         PRIMER_LEFT_TM = c(62.5, 62.7),
         PRIMER_RIGHT_TM = c(62.6, 62.8),
-        PRIMER_PAIR_PRODUCT_SIZE = c(1000L, 1000L),
+        PRIMER_PAIR_PRODUCT_SIZE = c(1200L, 1241L),
         PRIMER_PAIR_PENALTY = c(0.1, 0.2),
         stringsAsFactors = FALSE
       )
@@ -70,8 +70,11 @@ local({
           reference_type = "genome",
           start = primer_row$genome_start[[1]],
           end = primer_row$genome_end[[1]],
-          product_size = 1000L,
-          sequence = paste(rep("A", 1000L), collapse = ""),
+          product_size = primer_row$PRIMER_PAIR_PRODUCT_SIZE[[1]],
+          sequence = paste(
+            rep("A", primer_row$PRIMER_PAIR_PRODUCT_SIZE[[1]]),
+            collapse = ""
+          ),
           intended = passed,
           off_target = !passed,
           invalid_size = FALSE,
@@ -152,22 +155,61 @@ local({
     genome_end = c(500L, 1100L),
     stringsAsFactors = FALSE
   )
+  make_amplicon <- function(forward, reverse, width, fill) {
+    paste0(
+      forward,
+      paste(rep(fill, width - nchar(forward) - nchar(reverse)), collapse = ""),
+      reverse_complement_string(reverse)
+    )
+  }
+  left_template <- make_amplicon(
+    pair$PRIMER_LEFT_SEQUENCE[[1]],
+    pair$PRIMER_RIGHT_SEQUENCE[[1]],
+    300L,
+    "A"
+  )
+  right_template <- make_amplicon(
+    pair$PRIMER_LEFT_SEQUENCE[[2]],
+    pair$PRIMER_RIGHT_SEQUENCE[[2]],
+    400L,
+    "C"
+  )
+  genome_sequence <- paste(rep("T", 2000L), collapse = "")
+  substr(genome_sequence, 201L, 500L) <- left_template
+  substr(genome_sequence, 701L, 1100L) <- right_template
+  substr(genome_sequence, 10L, 30L) <- "GCTAGTCGATGCTACGTAGC"
+  substr(genome_sequence, 1231L, 1250L) <- reverse_complement_string(
+    "CGTACGATCGTAGCATCGAC"
+  )
   input <- list(
-    genome = DNAString(paste(rep("ACGT", 500L), collapse = "")),
+    genome = DNAString(genome_sequence),
     genome_reference_id = "fixture_genome",
+    genome_contig = "fixture_genome",
+    target_plasmid_sequence = DNAString(paste0(
+      "GGGACTAGT",
+      "GTTTTAGAGCTAGAAATAGCAAGTTAAAATAAGGCT",
+      "CCCC",
+      reverse_complement_string("AGTTGACGCTAAAAAAAGCACCGACTCGGTGCC"),
+      "CTGCAGAAAA"
+    )),
+    target_plasmid_name = "fixture_pTarget",
     parameters = list(
       cds_fs = FALSE,
       ncrna_fs = FALSE,
       n20_offtarget = 0L,
-      n20_arm_min_distance = 40L
+      n20_arm_min_distance = 40L,
+      site1 = "ACTAGT",
+      site2 = "CTGCAG",
+      primer3_buffer = primer3_buffer_parameters(),
+      primer_qc = list(max_product_size = 2000L)
     ),
     tools = list(primer3 = "unused", primer3_config = "unused")
   )
   arms <- list(
     pair = pair,
     ticks = c(201L, 500L, 701L, 1100L),
-    left = input$genome[201L:700L],
-    right = input$genome[701L:1200L],
+    left = DNAString(paste0(left_template, paste(rep("G", 200L), collapse = ""))),
+    right = DNAString(paste0(right_template, paste(rep("G", 100L), collapse = ""))),
     selected_pair_id = "homology_fixture",
     primer_qc_trace = trace
   )
@@ -205,7 +247,11 @@ local({
     result$wet_lab$primer_metrics,
     result$wet_lab$screening_product_sizes,
     result$wet_lab$n20_distances,
-    result$wet_lab$screening_qc
+    result$wet_lab$screening_qc,
+    result$wet_lab$edited_genome,
+    result$wet_lab$edited_ptargets,
+    result$wet_lab$ptarget_site_pair,
+    result$wet_lab$pcr_products
   )
 
   assert_true(
@@ -267,6 +313,44 @@ local({
         "Все обязательные ограничения пройдены"),
     "WetLab data lacks screening QC"
   )
+  assert_true(
+    nrow(result$wet_lab$pcr_products) == 5L &&
+      all(c(
+        "sgRNA_N20_1",
+        "left_homology_arm",
+        "right_homology_arm",
+        "screening_original_genome",
+        "screening_edited_genome"
+      ) %in% result$wet_lab$pcr_products$name) &&
+      identical(
+        result$wet_lab$pcr_products$length_bp,
+        nchar(result$wet_lab$pcr_products$sequence)
+      ),
+    "The complete PCR-product set was not modelled"
+  )
+  screening_products <- result$wet_lab$pcr_products[
+    startsWith(result$wet_lab$pcr_products$name, "screening_"),
+    ,
+    drop = FALSE
+  ]
+  assert_true(
+    identical(
+      screening_products$length_bp,
+      unname(as.integer(result$wet_lab$screening_product_sizes))
+    ),
+    "DECIPHER screening products disagree with reported product sizes"
+  )
+  left_product <- result$wet_lab$pcr_products$sequence[
+    result$wet_lab$pcr_products$name == "left_homology_arm"
+  ]
+  full_left_primer <- as.character(result$wet_lab$sequences[
+    grepl("_LF$", names(result$wet_lab$sequences))
+  ])
+  assert_true(
+    length(full_left_primer) == 1L &&
+      startsWith(left_product, full_left_primer),
+    "Homology-arm PCR product lacks its full service-tailed primer"
+  )
   wet_lab_report <- readLines(
     file.path(wet_lab_dir, "wet_lab_report.txt"),
     encoding = "UTF-8"
@@ -274,7 +358,8 @@ local({
   assert_true(
     any(grepl("N20_1.*59.*121", wet_lab_report)) &&
       any(grepl("Оффтаргетные ПЦР-продукты, всего.*0", wet_lab_report)) &&
-      any(grepl("Все обязательные ограничения пройдены.*пройдено", wet_lab_report)),
+      any(grepl("Все обязательные ограничения пройдены.*пройдено", wet_lab_report)) &&
+      any(grepl("DECIPHER::AmplifyDNA", wet_lab_report, fixed = TRUE)),
     "Selected screening QC was not written to the WetLab report"
   )
 })

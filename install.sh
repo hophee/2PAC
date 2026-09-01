@@ -209,6 +209,7 @@ packages <- c(
   "cran::digest",
 
   "bioc::Biostrings@2.78.0",
+  "bioc::DECIPHER@3.6.0",
   "bioc::openPrimeR@1.32.0",
   "bioc::rmelting@1.26.0"
 )
@@ -282,6 +283,7 @@ verify_primer_qc_dependencies() {
       "janitor",
       "digest",
       "Biostrings",
+      "DECIPHER",
       "openPrimeR",
       "rmelting"
     )
@@ -323,6 +325,7 @@ verify_primer_qc_dependencies() {
 
     expected_versions <- c(
       Biostrings = "2.78.0",
+      DECIPHER = "3.6.0",
       openPrimeR = "1.32.0",
       rmelting = "1.26.0"
     )

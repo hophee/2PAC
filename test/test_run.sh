@@ -33,7 +33,7 @@ fail() {
 
 cat > "$PLASMID" <<'EOF'
 >synthetic_test_target_plasmid
-ACGTACGATCGATGCTAGCTACGATCGTACGATCGATGCTAGCTACGATCGTACGATCGATGCTAGCTACGATCGT
+ACGTACGATCGATGACTAGTACGATCGTACGATCGATGCTAGCTACGATCGTACGATCTGCAGTAGCTACGATCGT
 EOF
 
 cat > "$CAS_PLASMID" <<'EOF'
@@ -75,6 +75,10 @@ grep -q $'^genome_file\t' "$TECH_REPORT_DIR/run_parameters.tsv" ||
   fail "run_parameters.tsv lacks the genome input path"
 grep -q $'^n20_arm_min_distance_nt\t40$' "$TECH_REPORT_DIR/run_parameters.tsv" ||
   fail "run_parameters.tsv lacks the N20-to-arm distance"
+grep -q $'^ptarget_site1\tACTAGT$' "$TECH_REPORT_DIR/run_parameters.tsv" ||
+  fail "run_parameters.tsv lacks the default site1"
+grep -q $'^ptarget_site2\tCTGCAG$' "$TECH_REPORT_DIR/run_parameters.tsv" ||
+  fail "run_parameters.tsv lacks the default site2"
 grep -q $'^primer3_buffer_divalent_salt_mm\t1.5$' "$TECH_REPORT_DIR/run_parameters.tsv" ||
   fail "run_parameters.tsv lacks Primer3 buffer data"
 grep -q $'^primer_qc_critical_3p_bases\t5$' "$TECH_REPORT_DIR/run_parameters.tsv" ||
@@ -114,10 +118,10 @@ for gene in recA pta hupB; do
   [[ "$status" == "ok" ]] || fail "$gene has unexpected summary status: $status"
   awk -F '\t' -v gene="$gene" 'NR > 1 && $1 == gene && $7 != "" && $7 != "NA" { found = 1 } END { exit !found }' "$SUMMARY" ||
     fail "$gene has no WetLab path in design_summary.tsv"
-  for result in all_primers.fasta edited_genome.fasta report.tsv; do
+  for result in all_primers.fasta edited_genome.fasta edited_pTargets.fasta pcr_products.fasta pcr_products.tsv report.tsv; do
     [[ -s "$target_dir/$result" ]] || fail "missing successful result for $gene: $result"
   done
-  for result in final_sequences.fasta final_sequences.txt wet_lab_report.txt; do
+  for result in final_sequences.fasta final_sequences.txt wet_lab_report.txt edited_genome.fasta edited_pTargets.fasta pcr_products.fasta pcr_products.tsv; do
     [[ -s "$wet_target_dir/$result" ]] ||
       fail "missing or empty WetLab result for $gene: $result"
   done
@@ -133,6 +137,13 @@ for gene in recA pta hupB; do
     fail "WetLab report lacks the unsuccessful-knockout PCR size for $gene"
   grep -q 'С успешным нокаутом' "$wet_target_dir/wet_lab_report.txt" ||
     fail "WetLab report lacks the successful-knockout PCR size for $gene"
+  grep -q 'DECIPHER::AmplifyDNA' "$wet_target_dir/wet_lab_report.txt" ||
+    fail "WetLab report lacks modelled PCR products for $gene"
+  ptarget_records="$(grep -c '^>' "$wet_target_dir/edited_pTargets.fasta")"
+  [[ "$ptarget_records" -eq 1 ]] ||
+    fail "WetLab does not contain one edited pTarget per selected N20 for $gene"
+  grep -q '^ACTAGT' <(awk '!/^>/ { print; exit }' "$wet_target_dir/edited_pTargets.fasta") ||
+    fail "edited pTarget does not start with one intact site1 for $gene"
   grep -q $'\tprimer_qc\tOK\t' "$target_dir/design.log" ||
     fail "design.log lacks primer_qc OK for $gene"
   Rscript - "$target_dir" <<'EOF' || fail "selected primer QC trace is invalid for $gene"
